@@ -18,7 +18,7 @@ import androidx.compose.ui.unit.*
 import androidx.navigation.NavType
 import androidx.navigation.compose.*
 import androidx.navigation.navArgument
-import com.google.firebase.auth.FirebaseAuth
+import com.socialshield.data.auth.SupabaseAuthManager
 import com.socialshield.domain.models.ScanType
 import com.socialshield.ui.screens.*
 import com.socialshield.ui.theme.*
@@ -41,7 +41,7 @@ import javax.inject.Inject
 class MainActivity : ComponentActivity() {
 
     @Inject
-    lateinit var auth: FirebaseAuth
+    lateinit var authManager: SupabaseAuthManager
 
     @Inject
     lateinit var preferencesManager: PreferencesManager
@@ -66,7 +66,7 @@ class MainActivity : ComponentActivity() {
             }
             
             SocialShieldTheme(darkTheme = isDarkTheme) {
-                SocialShieldApp(isLoggedIn = auth.currentUser != null)
+                SocialShieldApp(isLoggedIn = authManager.isUserLoggedIn)
             }
         }
     }

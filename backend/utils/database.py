@@ -1,149 +1,202 @@
-"""Firestore database utilities with persistent JSON fallback for dev/demo mode"""
+"""
+Supabase PostgreSQL database utilities with persistent JSON fallback for dev/testing.
+Replaces Firebase Firestore and MongoDB with relational PostgreSQL + Supabase Client.
+"""
 import os
 import json
 import logging
-import firebase_admin
-from firebase_admin import firestore
+from datetime import datetime
+from typing import Optional, List, Dict, Any
+from supabase import create_client, Client
 
 logger = logging.getLogger(__name__)
-_db = None
-_mock_db_instance = None
-_last_db_error = None
+
+_supabase_client: Optional[Client] = None
+_is_mock = False
+_last_db_error: Optional[str] = None
 
 
-class MockDocument:
-    def __init__(self, doc_id, data):
-        self.id = doc_id
-        self._data = data
-        self.exists = True
-
-    def to_dict(self):
-        return self._data
-
-
-class MockCollectionReference:
-    def __init__(self, name, parent_doc_path=None):
+class MockSupabaseTable:
+    """In-memory simulation of Supabase PostgREST table for dev/offline testing"""
+    def __init__(self, name: str, parent_db):
         self.name = name
-        self.parent_doc_path = parent_doc_path
-        self._docs = {}
+        self.parent_db = parent_db
+        self.records: Dict[str, Dict[str, Any]] = {}
 
-    def document(self, doc_id):
-        if doc_id not in self._docs:
-            self._docs[doc_id] = MockDocumentReference(doc_id, self)
-        return self._docs[doc_id]
+    def insert(self, data: Any):
+        class InsertBuilder:
+            def __init__(self, table, payload):
+                self.table = table
+                self.payload = payload if isinstance(payload, list) else [payload]
+            def execute(self):
+                inserted = []
+                for item in self.payload:
+                    rec = dict(item)
+                    rec_id = str(rec.get("id") or rec.get("user_id") or len(self.table.records) + 1)
+                    rec["id"] = rec_id
+                    self.table.records[rec_id] = rec
+                    inserted.append(rec)
+                self.table.parent_db.save_state()
+                return type("Resp", (), {"data": inserted})()
+        return InsertBuilder(self, data)
 
-    def stream(self):
-        return [MockDocument(doc_id, doc_ref._data) for doc_id, doc_ref in self._docs.items() if doc_ref._exists]
+    def select(self, *columns):
+        class SelectBuilder:
+            def __init__(self, table):
+                self.table = table
+                self.filters = []
+                self.order_col = None
+                self.order_desc = False
+                self.limit_val = None
+                self.offset_val = 0
 
-    def order_by(self, field, direction="DESCENDING"):
-        return self
+            def eq(self, column, value):
+                self.filters.append((column, "eq", value))
+                return self
 
-    def limit(self, count):
-        return self
+            def order(self, column, desc=False):
+                self.order_col = column
+                self.order_desc = desc
+                return self
 
-    def offset(self, count):
-        return self
+            def limit(self, count):
+                self.limit_val = count
+                return self
 
+            def range(self, start, end):
+                self.offset_val = start
+                self.limit_val = end - start + 1
+                return self
 
-class MockDocumentReference:
-    def __init__(self, doc_id, collection_ref):
-        self.id = doc_id
-        self.collection_ref = collection_ref
-        self._data = {}
-        self._exists = False
-        self._subcollections = {}
+            def execute(self):
+                matched = []
+                for rec in self.table.records.values():
+                    ok = True
+                    for col, op, val in self.filters:
+                        if rec.get(col) != val:
+                            ok = False
+                            break
+                    if ok:
+                        matched.append(dict(rec))
 
-    @property
-    def reference(self):
-        return self
+                if self.order_col:
+                    matched.sort(key=lambda r: str(r.get(self.order_col, "")), reverse=self.order_desc)
 
-    def get(self, transaction=None):
-        class Snap:
-            def __init__(self, doc_ref):
-                self.exists = doc_ref._exists
-                self._data = doc_ref._data
-            def to_dict(self):
-                return self._data
-        return Snap(self)
+                if self.limit_val is not None:
+                    matched = matched[self.offset_val:self.offset_val + self.limit_val]
+                elif self.offset_val > 0:
+                    matched = matched[self.offset_val:]
 
-    def set(self, data, merge=False):
-        if merge and self._exists:
-            self._data.update(data)
-        else:
-            self._data = data.copy()
-        self._exists = True
-        self._save_to_disk()
+                return type("Resp", (), {"data": matched, "count": len(matched)})()
+        return SelectBuilder(self)
 
-    def update(self, data):
-        self._data.update(data)
-        self._exists = True
-        self._save_to_disk()
+    def update(self, data: Dict[str, Any]):
+        class UpdateBuilder:
+            def __init__(self, table, payload):
+                self.table = table
+                self.payload = payload
+                self.filters = []
+
+            def eq(self, column, value):
+                self.filters.append((column, "eq", value))
+                return self
+
+            def execute(self):
+                updated = []
+                for rec_id, rec in self.table.records.items():
+                    ok = True
+                    for col, op, val in self.filters:
+                        if rec.get(col) != val:
+                            ok = False
+                            break
+                    if ok:
+                        rec.update(self.payload)
+                        updated.append(dict(rec))
+                self.table.parent_db.save_state()
+                return type("Resp", (), {"data": updated})()
+        return UpdateBuilder(self, data)
 
     def delete(self):
-        self._exists = False
-        self._data = {}
-        self._save_to_disk()
+        class DeleteBuilder:
+            def __init__(self, table):
+                self.table = table
+                self.filters = []
 
-    def collection(self, name):
-        if name not in self._subcollections:
-            self._subcollections[name] = MockCollectionReference(name, f"{self.collection_ref.name}/{self.id}")
-        return self._subcollections[name]
+            def eq(self, column, value):
+                self.filters.append((column, "eq", value))
+                return self
 
-    def _save_to_disk(self):
-        global _mock_db_instance
-        if _mock_db_instance:
-            _mock_db_instance.save_state()
+            def execute(self):
+                to_delete = []
+                for rec_id, rec in self.table.records.items():
+                    ok = True
+                    for col, op, val in self.filters:
+                        if rec.get(col) != val:
+                            ok = False
+                            break
+                    if ok:
+                        to_delete.append(rec_id)
+                for rid in to_delete:
+                    del self.table.records[rid]
+                self.table.parent_db.save_state()
+                return type("Resp", (), {"data": to_delete})()
+        return DeleteBuilder(self)
+
+    def upsert(self, data: Any):
+        return self.insert(data)
 
 
-class MockFirestoreClient:
-    def __init__(self, filepath="db_store.json"):
+class MockStorageBucket:
+    def __init__(self, name: str):
+        self.name = name
+        self.files = {}
+
+    def upload(self, path: str, file: bytes, file_options: Optional[dict] = None):
+        self.files[path] = file
+        return {"Key": path}
+
+    def create_signed_url(self, path: str, expires_in: int = 3600):
+        return {"signedURL": f"https://mock-supabase.co/storage/v1/object/sign/{self.name}/{path}?token=mock"}
+
+    def remove(self, paths: list):
+        for p in paths:
+            self.files.pop(p, None)
+        return [{"name": p} for p in paths]
+
+
+class MockStorageClient:
+    def __init__(self):
+        self.buckets: Dict[str, MockStorageBucket] = {}
+
+    def from_(self, name: str) -> MockStorageBucket:
+        if name not in self.buckets:
+            self.buckets[name] = MockStorageBucket(name)
+        return self.buckets[name]
+
+
+class MockSupabaseClient:
+    """Mock Supabase Client with persistent JSON storage"""
+    def __init__(self, filepath="supabase_mock_store.json"):
         self.filepath = filepath
-        self.collections = {}
+        self.tables: Dict[str, MockSupabaseTable] = {}
+        self.storage = MockStorageClient()
         self.load_state()
 
-    def collection(self, name):
-        if name not in self.collections:
-            self.collections[name] = MockCollectionReference(name)
-        return self.collections[name]
+    def table(self, name: str) -> MockSupabaseTable:
+        if name not in self.tables:
+            self.tables[name] = MockSupabaseTable(name, self)
+        return self.tables[name]
 
-    def document(self, path):
-        parts = path.strip("/").split("/")
-        ref = self
-        for i, part in enumerate(parts):
-            if i % 2 == 0:
-                ref = ref.collection(part)
-            else:
-                ref = ref.document(part)
-        return ref
-
-    def transaction(self):
-        class MockTransaction:
-            def set(self, ref, data, merge=False):
-                ref.set(data, merge)
-            def get(self, ref):
-                return ref.get()
-        return MockTransaction()
+    def from_(self, name: str) -> MockSupabaseTable:
+        return self.table(name)
 
     def save_state(self):
-        state = {}
-        for col_name, col in self.collections.items():
-            state[col_name] = {}
-            for doc_id, doc in col._docs.items():
-                if doc._exists:
-                    state[col_name][doc_id] = {
-                        "data": doc._data,
-                        "subcollections": {}
-                    }
-                    for sub_name, sub in doc._subcollections.items():
-                        state[col_name][doc_id]["subcollections"][sub_name] = {}
-                        for sdoc_id, sdoc in sub._docs.items():
-                            if sdoc._exists:
-                                state[col_name][doc_id]["subcollections"][sub_name][sdoc_id] = sdoc._data
+        state = {tbl: t.records for tbl, t in self.tables.items()}
         try:
             with open(self.filepath, "w") as f:
                 json.dump(state, f, indent=2)
         except Exception as e:
-            logger.error(f"Failed to save mock db state: {e}")
+            logger.error(f"Error saving mock Supabase store: {e}")
 
     def load_state(self):
         if not os.path.exists(self.filepath):
@@ -151,126 +204,163 @@ class MockFirestoreClient:
         try:
             with open(self.filepath, "r") as f:
                 state = json.load(f)
-            for col_name, col_data in state.items():
-                col = self.collection(col_name)
-                for doc_id, doc_info in col_data.items():
-                    doc = col.document(doc_id)
-                    doc._data = doc_info["data"]
-                    doc._exists = True
-                    for sub_name, sub_data in doc_info.get("subcollections", {}).items():
-                        sub = doc.collection(sub_name)
-                        for sdoc_id, sdoc_val in sub_data.items():
-                            sdoc = sub.document(sdoc_id)
-                            sdoc._data = sdoc_val
-                            sdoc._exists = True
+            for tbl, recs in state.items():
+                t = self.table(tbl)
+                t.records = recs
         except Exception as e:
-            logger.error(f"Failed to load mock db state: {e}")
+            logger.error(f"Error loading mock Supabase store: {e}")
 
 
 async def init_db():
-    global _db
-    try:
-        from utils.auth import init_firebase
-        init_firebase()
-        _db = firestore.client()
-        logger.info("Firestore connected")
-    except Exception as e:
-        logger.warning(f"Firestore not available: {e}. Running with persistent JSON database fallback.")
+    """Initializes the Supabase client or activates the mock fallback"""
+    global _supabase_client, _is_mock, _last_db_error
+
+    supabase_url = os.getenv("SUPABASE_URL")
+    supabase_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_KEY") or os.getenv("SUPABASE_ANON_KEY")
+
+    if supabase_url and supabase_key and "example" not in supabase_url:
+        try:
+            _supabase_client = create_client(supabase_url, supabase_key)
+            _is_mock = False
+            _last_db_error = None
+            logger.info("Connected to Supabase PostgreSQL successfully!")
+            return
+        except Exception as e:
+            _last_db_error = str(e)
+            logger.warning(f"Failed to connect to Supabase: {e}. Falling back to MockSupabaseClient.")
+
+    logger.info("Running in Mock Supabase mode (dev/offline).")
+    _supabase_client = MockSupabaseClient()
+    _is_mock = True
 
 
-def get_db():
-    global _mock_db_instance
-    if _db is not None:
-        return _db
-    if _mock_db_instance is None:
-        _mock_db_instance = MockFirestoreClient()
-    return _mock_db_instance
+def get_supabase_client():
+    global _supabase_client
+    if _supabase_client is None:
+        supabase_url = os.getenv("SUPABASE_URL")
+        supabase_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_KEY")
+        if supabase_url and supabase_key and "example" not in supabase_url:
+            try:
+                _supabase_client = create_client(supabase_url, supabase_key)
+                return _supabase_client
+            except Exception:
+                pass
+        _supabase_client = MockSupabaseClient()
+    return _supabase_client
+
+
+def is_mock_db() -> bool:
+    return _is_mock
 
 
 async def save_scan_result_and_update_stats(user_id: str, scan_id: str, result: dict):
-    """Save scan result to subcollection and transactionally update user stats"""
+    """
+    Persists scan result into Supabase PostgreSQL 'scans' table and updates 'user_stats'.
+    Supports bidirectional mapping between snake_case and camelCase for Android and Web.
+    """
+    global _last_db_error
     try:
-        db = get_db()
-        
-        # Extract string values from Enums if present
-        media_type = result.get("media_type")
+        client = get_supabase_client()
+
+        # Normalize media_type and verdict strings
+        media_type = result.get("media_type") or result.get("mediaType") or "IMAGE"
         if hasattr(media_type, "value"):
             media_type = media_type.value
-        elif hasattr(media_type, "name"):
-            media_type = media_type.name
-            
-        verdict = result.get("verdict")
+        media_type = str(media_type).upper()
+
+        verdict = result.get("verdict") or "SAFE"
         if hasattr(verdict, "value"):
             verdict = verdict.value
-        elif hasattr(verdict, "name"):
-            verdict = verdict.name
-            
-        # Map snake_case to camelCase for Android and shared database compatibility
-        result_camel = {
-            "scanId": str(result.get("scan_id") or scan_id),
-            "userId": str(result.get("user_id") or user_id),
-            "mediaType": str(media_type or "IMAGE"),
-            "verdict": str(verdict or "SAFE"),
+        verdict = str(verdict).upper()
+
+        scan_record = {
+            "id": scan_id,
+            "user_id": user_id,
+            "media_type": media_type,
+            "verdict": verdict,
             "confidence": float(result.get("confidence") or 100.0),
-            "fakeProbability": float(result.get("fake_probability") or 0.0),
-            "realProbability": float(result.get("real_probability") or 100.0),
-            "riskLevel": str(result.get("risk_level") or "LOW"),
-            "explanations": [str(e) for e in (result.get("explanations") or [])],
-            "recommendations": [str(r) for r in (result.get("recommendations") or [])],
-            "heatmapBase64": result.get("heatmap_base64"),
-            "metadata": result.get("metadata"),
-            "timestamp": str(result.get("timestamp"))
+            "fake_probability": float(result.get("fake_probability") or result.get("fakeProbability") or 0.0),
+            "real_probability": float(result.get("real_probability") or result.get("realProbability") or 100.0),
+            "risk_level": str(result.get("risk_level") or result.get("riskLevel") or "LOW").upper(),
+            "explanations": result.get("explanations") or [],
+            "recommendations": result.get("recommendations") or [],
+            "heatmap_base64": result.get("heatmap_base64") or result.get("heatmapBase64"),
+            "storage_path": result.get("storage_path"),
+            "storage_url": result.get("storage_url"),
+            "metadata": result.get("metadata") or {},
+            "created_at": result.get("timestamp") or datetime.utcnow().isoformat()
         }
-        
-        # 1. Save scan to subcollection
-        scan_ref = db.collection("users").document(user_id).collection("scans").document(scan_id)
-        scan_ref.set(result_camel)
-        
-        # 2. Update user stats document transactionally
-        user_ref = db.collection("users").document(user_id)
-        
-        @firestore.transactional
-        def update_stats_transaction(transaction, user_reference):
-            snapshot = user_reference.get(transaction=transaction)
-            
-            total_scans = 0
-            fake_detected = 0
-            suspicious_detected = 0
-            safe_detected = 0
-            
-            if snapshot.exists:
-                user_data = snapshot.to_dict()
-                total_scans = user_data.get("totalScans", 0) or 0
-                fake_detected = user_data.get("fakeDetected", 0) or 0
-                suspicious_detected = user_data.get("suspiciousDetected", 0) or 0
-                safe_detected = user_data.get("safeDetected", 0) or 0
-                
-            verdict = result_camel.get("verdict", "SAFE").upper()
-            total_scans += 1
-            if verdict in ("SAFE", "REAL"):
-                safe_detected += 1
-            elif verdict == "SUSPICIOUS":
-                suspicious_detected += 1
-            elif verdict == "FAKE":
-                fake_detected += 1
-                
-            trust_score = 100
-            if total_scans > 0:
-                trust_score = int(((safe_detected + 0.5 * suspicious_detected) / total_scans) * 100)
-                
-            transaction.set(user_reference, {
-                "totalScans": total_scans,
-                "fakeDetected": fake_detected,
-                "suspiciousDetected": suspicious_detected,
-                "safeDetected": safe_detected,
-                "trustScore": trust_score
-            }, merge=True)
-            
-        transaction = db.transaction()
-        update_stats_transaction(transaction, user_ref)
-        logger.info(f"Scan {scan_id} saved and stats updated successfully for user {user_id}")
-        
+
+        # 1. Insert Scan into PostgreSQL
+        if hasattr(client, "table"):
+            client.table("scans").insert(scan_record).execute()
+        elif hasattr(client, "from_"):
+            client.from_("scans").insert(scan_record).execute()
+
+        # 2. Update user_stats in PostgreSQL (recalculates stats)
+        await recalculate_and_update_stats(user_id, verdict)
+
+        logger.info(f"Scan {scan_id} persisted to Supabase PostgreSQL for user {user_id}")
+
     except Exception as e:
-        global _last_db_error
         _last_db_error = str(e)
-        logger.error(f"Failed to save scan result or update stats: {e}")
+        logger.error(f"Error persisting scan to Supabase PostgreSQL: {e}")
+        raise
+
+
+async def recalculate_and_update_stats(user_id: str, new_verdict: Optional[str] = None):
+    """Calculates aggregates and updates public.user_stats"""
+    try:
+        client = get_supabase_client()
+        # Fetch current user scans
+        res = client.table("scans").select("*").eq("user_id", user_id).execute()
+        scans = res.data or []
+
+        total = len(scans)
+        fake = sum(1 for s in scans if s.get("verdict") == "FAKE")
+        suspicious = sum(1 for s in scans if s.get("verdict") == "SUSPICIOUS")
+        safe = sum(1 for s in scans if s.get("verdict") in ("SAFE", "REAL"))
+
+        trust = 100
+        if total > 0:
+            trust = int(((safe + 0.5 * suspicious) / total) * 100)
+
+        stats_data = {
+            "user_id": user_id,
+            "total_scans": total,
+            "fake_detected": fake,
+            "suspicious_detected": suspicious,
+            "safe_detected": safe,
+            "trust_score": trust,
+            "updated_at": datetime.utcnow().isoformat()
+        }
+
+        # Upsert into user_stats
+        if hasattr(client.table("user_stats"), "upsert"):
+            client.table("user_stats").upsert(stats_data).execute()
+        else:
+            client.table("user_stats").insert(stats_data).execute()
+
+    except Exception as e:
+        logger.warning(f"Failed to recalculate user stats in client: {e}")
+
+
+async def get_user_stats(user_id: str) -> Dict[str, Any]:
+    """Retrieve aggregate stats for user from public.user_stats"""
+    try:
+        client = get_supabase_client()
+        res = client.table("user_stats").select("*").eq("user_id", user_id).execute()
+        if res.data and len(res.data) > 0:
+            row = res.data[0]
+            return {
+                "totalScans": row.get("total_scans", 0),
+                "fakeDetected": row.get("fake_detected", 0),
+                "suspiciousDetected": row.get("suspicious_detected", 0),
+                "safeDetected": row.get("safe_detected", 0),
+                "trustScore": row.get("trust_score", 100)
+            }
+        # If no row exists yet, return default
+        return {"totalScans": 0, "fakeDetected": 0, "suspiciousDetected": 0, "safeDetected": 0, "trustScore": 100}
+    except Exception as e:
+        logger.error(f"Error fetching user stats: {e}")
+        return {"totalScans": 0, "fakeDetected": 0, "suspiciousDetected": 0, "safeDetected": 0, "trustScore": 100}

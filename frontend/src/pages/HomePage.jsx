@@ -1,8 +1,9 @@
 // ─── Home Page ────────────────────────────────────────────────────────────────
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useCallback } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
 import { useAuth } from '../AuthContext';
 import { getUserStats, getHistory } from '../api';
+import { supabase, isSupabaseConfigured } from '../supabase';
 
 const SCAN_TYPES = [
   { type: 'image',   icon: '🖼️',  label: 'Scan Image',   sub: 'Detect AI-generated faces',        color: '#00D4FF', bg: 'rgba(0,212,255,0.12)'   },
@@ -26,7 +27,7 @@ export default function HomePage() {
   const [recent, setRecent] = useState([]);
   const [statsLoading, setStatsLoading] = useState(true);
 
-  useEffect(() => {
+  const loadData = useCallback(() => {
     getUserStats()
       .then((r) => {
         const data = r.data;
@@ -45,6 +46,38 @@ export default function HomePage() {
       .then((r) => setRecent(r.data?.items?.slice(0, 4) || []))
       .catch(() => setRecent([]));
   }, []);
+
+  // Initial load + Supabase Realtime synchronization
+  useEffect(() => {
+    loadData();
+
+    // Bidirectional Synchronization: Listen to changes made from Android or other sessions
+    if (isSupabaseConfigured() && user?.uid) {
+      const channel = supabase
+        .channel(`realtime-scans-home-${user.uid}`)
+        .on(
+          'postgres_changes',
+          { event: '*', schema: 'public', table: 'scans', filter: `user_id=eq.${user.uid}` },
+          (payload) => {
+            console.log('[Supabase Realtime] Scan event received on Web:', payload);
+            loadData();
+          }
+        )
+        .on(
+          'postgres_changes',
+          { event: '*', schema: 'public', table: 'user_stats', filter: `user_id=eq.${user.uid}` },
+          (payload) => {
+            console.log('[Supabase Realtime] User stats updated on Web:', payload);
+            loadData();
+          }
+        )
+        .subscribe();
+
+      return () => {
+        supabase.removeChannel(channel);
+      };
+    }
+  }, [user?.uid, loadData]);
 
   const scoreColor = stats.trustScore >= 80 ? '#06FFA5' : stats.trustScore >= 50 ? '#FFB800' : '#FF3B3B';
   const greetName = user?.displayName || user?.email?.split('@')[0] || 'Shield User';
@@ -100,59 +133,69 @@ export default function HomePage() {
           {SCAN_TYPES.map(({ type, icon, label, sub, color, bg }) => (
             <div
               key={type}
-              id={`scan-${type}`}
+              id={`scan-btn-${type}`}
               className="scan-type-card"
               onClick={() => navigate(`/scan/${type}`)}
-              style={{ borderColor: `${color}22` }}
-              onMouseEnter={(e) => {
-                e.currentTarget.style.borderColor = `${color}55`;
-                e.currentTarget.style.boxShadow = `0 0 24px ${color}20`;
-              }}
-              onMouseLeave={(e) => {
-                e.currentTarget.style.borderColor = `${color}22`;
-                e.currentTarget.style.boxShadow = 'none';
-              }}
+              style={{ cursor: 'pointer' }}
             >
-              <div className="scan-type-icon" style={{ background: bg, color }}>
+              <div className="scan-icon" style={{ background: bg }}>
                 {icon}
               </div>
-              <h3>{label}</h3>
-              <p>{sub}</p>
-              <div style={{ marginTop: 12, color, fontSize: 12, fontWeight: 600 }}>Tap to scan →</div>
+              <h3 style={{ fontSize: 15, fontWeight: 700, marginBottom: 4 }}>{label}</h3>
+              <p style={{ fontSize: 12, color: 'rgba(255,255,255,0.45)', lineHeight: 1.4 }}>{sub}</p>
             </div>
           ))}
         </div>
       </div>
 
       {/* ── Recent Scans ── */}
-      {recent.length > 0 && (
-        <div className="section">
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-            <h2 style={{ fontSize: 18, fontWeight: 700 }}>Recent Scans</h2>
-            <Link to="/history" style={{ color: 'var(--neon-blue)', fontSize: 13, fontWeight: 600, textDecoration: 'none' }}>View All →</Link>
+      <div className="section">
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+          <h2 style={{ fontSize: 18, fontWeight: 700 }}>Recent Scans</h2>
+          <Link to="/history" style={{ color: 'var(--neon-blue)', fontSize: 13, textDecoration: 'none' }}>
+            View all →
+          </Link>
+        </div>
+
+        {recent.length === 0 ? (
+          <div className="empty-state">
+            <div className="empty-icon">🛡️</div>
+            <p style={{ color: 'rgba(255,255,255,0.4)', fontSize: 14 }}>No scans yet. Choose a detection type above to get started.</p>
           </div>
+        ) : (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-            {recent.map((scan) => (
-              <div
-                key={scan.scanId}
-                className="history-item"
-                onClick={() => navigate(`/result/${scan.scanId}`)}
-              >
-                <div className="history-icon-box" style={{ background: 'rgba(0,212,255,0.1)', color: 'var(--neon-blue)', fontSize: 20 }}>
-                  {{ IMAGE:'🖼️', VIDEO:'🎬', AUDIO:'🎙️', TEXT:'📝', URL:'🔗' }[scan.mediaType] || '🛡️'}
-                </div>
-                <div style={{ flex: 1 }}>
-                  <div style={{ fontWeight: 600, fontSize: 14 }}>{scan.mediaType} Scan</div>
-                  <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.4)', marginTop: 2 }}>
-                    {new Date(scan.timestamp).toLocaleString()}
+            {recent.map((scan) => {
+              const sid = scan.id || scan.scanId;
+              const mtype = scan.mediaType || scan.media_type;
+              return (
+                <div
+                  key={sid}
+                  className="history-item"
+                  onClick={() => navigate(`/result/${sid}`)}
+                >
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 12, minWidth: 0 }}>
+                    <div className="history-icon-box" style={{ background: 'rgba(0,212,255,0.08)', color: 'var(--neon-blue)' }}>
+                      🛡️
+                    </div>
+                    <div style={{ minWidth: 0 }}>
+                      <div style={{ fontWeight: 600, fontSize: 14 }}>{mtype} Scan</div>
+                      <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.4)', marginTop: 2 }}>
+                        {new Date(scan.timestamp || scan.created_at).toLocaleString()}
+                      </div>
+                    </div>
+                  </div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexShrink: 0 }}>
+                    <VerdictBadge verdict={scan.verdict} />
+                    <span style={{ color: 'rgba(255,255,255,0.4)', fontSize: 13 }}>
+                      {scan.confidence?.toFixed(0)}%
+                    </span>
                   </div>
                 </div>
-                <VerdictBadge verdict={scan.verdict} />
-              </div>
-            ))}
+              );
+            })}
           </div>
-        </div>
-      )}
+        )}
+      </div>
     </div>
   );
 }

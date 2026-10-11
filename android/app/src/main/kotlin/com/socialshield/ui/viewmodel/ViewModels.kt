@@ -1,12 +1,12 @@
-// ─── Auth ViewModel ──────────────────────────────────────────────────────────
+// ─── Social Shield ViewModels (Supabase Auth & PostgreSQL Realtime Integration) ──
 package com.socialshield.ui.viewmodel
 
 import android.content.Context
 import android.net.Uri
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import com.google.firebase.auth.FirebaseAuth
-import com.google.firebase.auth.GoogleAuthProvider
+import com.socialshield.data.auth.AuthResult
+import com.socialshield.data.auth.SupabaseAuthManager
 import com.socialshield.data.repository.ApiResult
 import com.socialshield.data.repository.ScanRepository
 import com.socialshield.data.repository.PreferencesManager
@@ -28,9 +28,19 @@ data class AuthUiState(
 )
 
 @HiltViewModel
-class AuthViewModel @Inject constructor(private val auth: FirebaseAuth) : ViewModel() {
-    private val _uiState = MutableStateFlow(AuthUiState(isLoggedIn = auth.currentUser != null))
+class AuthViewModel @Inject constructor(
+    private val authManager: SupabaseAuthManager
+) : ViewModel() {
+    private val _uiState = MutableStateFlow(AuthUiState(isLoggedIn = authManager.isUserLoggedIn))
     val uiState: StateFlow<AuthUiState> = _uiState.asStateFlow()
+
+    init {
+        viewModelScope.launch {
+            authManager.currentUserFlow.collect { user ->
+                _uiState.update { it.copy(isLoggedIn = user != null) }
+            }
+        }
+    }
 
     fun signIn(email: String, password: String) {
         if (email.isBlank() || password.isBlank()) {
@@ -38,9 +48,12 @@ class AuthViewModel @Inject constructor(private val auth: FirebaseAuth) : ViewMo
             return
         }
         _uiState.update { it.copy(isLoading = true, error = null) }
-        auth.signInWithEmailAndPassword(email, password)
-            .addOnSuccessListener { _uiState.update { it.copy(isLoading = false, isLoggedIn = true) } }
-            .addOnFailureListener { e -> _uiState.update { it.copy(isLoading = false, error = e.message) } }
+        viewModelScope.launch {
+            when (val res = authManager.signInWithEmail(email, password)) {
+                is AuthResult.Success -> _uiState.update { it.copy(isLoading = false, isLoggedIn = true) }
+                is AuthResult.Error -> _uiState.update { it.copy(isLoading = false, error = res.message) }
+            }
+        }
     }
 
     fun signUp(email: String, password: String) {
@@ -53,34 +66,31 @@ class AuthViewModel @Inject constructor(private val auth: FirebaseAuth) : ViewMo
             return
         }
         _uiState.update { it.copy(isLoading = true, error = null) }
-        auth.createUserWithEmailAndPassword(email, password)
-            .addOnSuccessListener { _uiState.update { it.copy(isLoading = false, isLoggedIn = true) } }
-            .addOnFailureListener { e -> _uiState.update { it.copy(isLoading = false, error = e.message) } }
+        viewModelScope.launch {
+            when (val res = authManager.signUpWithEmail(email, password)) {
+                is AuthResult.Success -> _uiState.update { it.copy(isLoading = false, isLoggedIn = true) }
+                is AuthResult.Error -> _uiState.update { it.copy(isLoading = false, error = res.message) }
+            }
+        }
     }
 
     fun signInWithGoogle(idToken: String) {
         _uiState.update { it.copy(isLoading = true, error = null) }
-        val credential = GoogleAuthProvider.getCredential(idToken, null)
-        auth.signInWithCredential(credential)
-            .addOnSuccessListener { _uiState.update { it.copy(isLoading = false, isLoggedIn = true) } }
-            .addOnFailureListener { e -> _uiState.update { it.copy(isLoading = false, error = e.message) } }
+        viewModelScope.launch {
+            when (val res = authManager.signInWithGoogle(idToken)) {
+                is AuthResult.Success -> _uiState.update { it.copy(isLoading = false, isLoggedIn = true) }
+                is AuthResult.Error -> _uiState.update { it.copy(isLoading = false, error = res.message) }
+            }
+        }
     }
 
     fun signOut() {
-        auth.signOut()
+        authManager.signOut()
         _uiState.update { AuthUiState(isLoggedIn = false) }
     }
 }
 
 // ─── Home ─────────────────────────────────────────────────────────────────────
-private val DEMO_HISTORY = listOf(
-    ScanHistoryItem("demo1", "IMAGE", "SAFE", 98f, "2026-07-23T09:12:00Z"),
-    ScanHistoryItem("demo2", "URL", "FAKE", 94f, "2026-07-22T14:30:00Z"),
-    ScanHistoryItem("demo3", "TEXT", "SUSPICIOUS", 75f, "2026-07-21T11:45:00Z"),
-    ScanHistoryItem("demo4", "PROFILE", "SAFE", 99f, "2026-07-20T08:20:00Z"),
-    ScanHistoryItem("demo5", "VIDEO", "SAFE", 95f, "2026-07-19T16:10:00Z")
-)
-
 data class HomeUiState(
     val userName: String = "",
     val trustScore: Int = 100,
@@ -93,16 +103,20 @@ data class HomeUiState(
 @HiltViewModel
 class HomeViewModel @Inject constructor(
     private val repo: ScanRepository,
-    private val auth: FirebaseAuth
+    private val authManager: SupabaseAuthManager
 ) : ViewModel() {
     private val _uiState = MutableStateFlow(HomeUiState())
     val uiState: StateFlow<HomeUiState> = _uiState.asStateFlow()
 
     init {
-        val user = auth.currentUser
-        _uiState.update { it.copy(userName = user?.displayName ?: user?.email?.substringBefore('@') ?: "") }
-        
-        // Listen to user stats in real-time
+        viewModelScope.launch {
+            authManager.currentUserFlow.collect { user ->
+                val name = user?.displayName ?: user?.email?.substringBefore('@') ?: "Shield User"
+                _uiState.update { it.copy(userName = name) }
+            }
+        }
+
+        // Listen to user stats in real-time from Supabase
         viewModelScope.launch {
             repo.getUserStatsFlow().collect { stats ->
                 if (stats != null) {
@@ -118,17 +132,16 @@ class HomeViewModel @Inject constructor(
             }
         }
 
-        // Listen to recent history in real-time
+        // Listen to recent history in real-time from Supabase
         viewModelScope.launch {
             repo.getHistoryFlow().collect { history ->
                 _uiState.update {
-                    it.copy(recentScans = history)
+                    it.copy(recentScans = history.take(5))
                 }
             }
         }
     }
 }
-
 
 // ─── Scan ─────────────────────────────────────────────────────────────────────
 data class ScanUiState(
@@ -251,8 +264,17 @@ class HistoryViewModel @Inject constructor(private val repo: ScanRepository) : V
 @HiltViewModel
 class SettingsViewModel @Inject constructor(
     private val preferencesManager: PreferencesManager,
-    private val auth: FirebaseAuth
+    private val authManager: SupabaseAuthManager
 ) : ViewModel() {
+    val currentUser = authManager.currentUserFlow.stateIn(
+        scope = viewModelScope,
+        started = SharingStarted.WhileSubscribed(5000),
+        initialValue = authManager.currentUser
+    )
+
+    fun signOut() {
+        authManager.signOut()
+    }
     val darkMode = preferencesManager.darkModeFlow.stateIn(
         scope = viewModelScope,
         started = SharingStarted.WhileSubscribed(5000),

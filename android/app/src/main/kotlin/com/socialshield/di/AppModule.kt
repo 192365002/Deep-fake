@@ -1,13 +1,14 @@
 package com.socialshield.di
 
-import com.google.firebase.auth.FirebaseAuth
-import com.google.firebase.firestore.FirebaseFirestore
+import android.content.Context
 import com.jakewharton.retrofit2.converter.kotlinx.serialization.asConverterFactory
 import com.socialshield.BuildConfig
 import com.socialshield.data.api.SocialShieldApi
+import com.socialshield.data.auth.SupabaseAuthManager
 import dagger.Module
 import dagger.Provides
 import dagger.hilt.InstallIn
+import dagger.hilt.android.qualifiers.ApplicationContext
 import dagger.hilt.components.SingletonComponent
 import kotlinx.serialization.json.Json
 import okhttp3.MediaType.Companion.toMediaType
@@ -38,7 +39,7 @@ object AppModule {
             level = HttpLoggingInterceptor.Level.BODY
         })
         .connectTimeout(10, TimeUnit.SECONDS)
-        .readTimeout(120, TimeUnit.SECONDS)   // Long timeout for video/model inference
+        .readTimeout(120, TimeUnit.SECONDS)   // Long timeout for model inference
         .writeTimeout(120, TimeUnit.SECONDS)
         .build()
 
@@ -56,9 +57,9 @@ object AppModule {
 
     @Provides
     @Singleton
-    fun provideFirebaseAuth(): FirebaseAuth = FirebaseAuth.getInstance()
-
-    @Provides
-    @Singleton
-    fun provideFirebaseFirestore(): FirebaseFirestore = FirebaseFirestore.getInstance()
+    fun provideSupabaseAuthManager(
+        @ApplicationContext context: Context,
+        client: OkHttpClient,
+        json: Json
+    ): SupabaseAuthManager = SupabaseAuthManager(context, client, json)
 }

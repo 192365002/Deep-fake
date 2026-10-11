@@ -230,7 +230,7 @@ def analyze_url_phishing(url_string):
     url_string = url_string.lower().strip()
     
     # Common phishing list simulations
-    blacklisted_keywords = ['secure-login', 'update-account', 'verify-identity', 'paypal-login', 'netflix-billing', 'metamask-support', 'giftcard-free', 'win-reward', 'login-verify']
+    blacklisted_keywords = ['secure-login', 'secure-update', 'update-account', 'verify-identity', 'paypal-login', 'netflix-billing', 'metamask-support', 'giftcard-free', 'win-reward', 'login-verify', 'credentials']
     suspicious_tlds = ['.xyz', '.click', '.info', '.top', '.loan', '.work', '.gq', '.cf', '.tk']
     
     score = 10

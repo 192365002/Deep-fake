@@ -23,7 +23,6 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.google.firebase.auth.FirebaseAuth
 import com.socialshield.ui.components.GlassCard
 import com.socialshield.ui.components.NeonButton
 import com.socialshield.ui.theme.*
@@ -33,16 +32,15 @@ import com.socialshield.ui.theme.*
 data class FraudReport(val city: String, val country: String, val count: Int, val type: String, val severity: String)
 
 private val SAMPLE_REPORTS = listOf(
-    FraudReport("Mumbai", "India", 342, "Phishing SMS", "HIGH"),
-    FraudReport("Lagos", "Nigeria", 218, "Romance Scam", "HIGH"),
-    FraudReport("London", "UK", 156, "Deepfake Video", "MEDIUM"),
-    FraudReport("New York", "USA", 189, "Voice Cloning", "HIGH"),
-    FraudReport("Beijing", "China", 134, "Fake Profile", "MEDIUM"),
-    FraudReport("São Paulo", "Brazil", 97, "Crypto Scam", "HIGH"),
-    FraudReport("Jakarta", "Indonesia", 88, "Phishing URL", "MEDIUM"),
-    FraudReport("Nairobi", "Kenya", 75, "OTP Fraud", "HIGH"),
-    FraudReport("Dhaka", "Bangladesh", 67, "Fake Lottery", "LOW"),
-    FraudReport("Mexico City", "Mexico", 61, "Identity Theft", "MEDIUM")
+    FraudReport("Mumbai", "India", 3201, "Phishing SMS", "HIGH"),
+    FraudReport("London", "UK", 2140, "Deepfake Video", "HIGH"),
+    FraudReport("New York", "USA", 1842, "Voice Cloning", "HIGH"),
+    FraudReport("Jakarta", "Indonesia", 1540, "Phishing URL", "HIGH"),
+    FraudReport("Beijing", "China", 980, "Fake Profile", "MEDIUM"),
+    FraudReport("Dubai", "UAE", 890, "Crypto Scam", "MEDIUM"),
+    FraudReport("Lagos", "Nigeria", 620, "Romance Scam", "MEDIUM"),
+    FraudReport("São Paulo", "Brazil", 540, "Identity Theft", "LOW"),
+    FraudReport("Sydney", "Australia", 210, "Fake Lottery", "LOW")
 )
 
 @Composable
@@ -80,8 +78,8 @@ fun FraudMapScreen(onBack: () -> Unit) {
                     }
                 }
                 Column(horizontalAlignment = Alignment.End) {
-                    Text("10,247", color = NeonBlue, fontSize = 18.sp, fontWeight = FontWeight.Bold)
-                    Text("reports today", color = ContentColor.copy(0.5f), fontSize = 10.sp)
+                    Text("12,655", color = NeonBlue, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                    Text("total reports", color = ContentColor.copy(0.5f), fontSize = 10.sp)
                 }
             }
         }
@@ -102,14 +100,15 @@ fun FraudMapScreen(onBack: () -> Unit) {
             androidx.compose.foundation.Canvas(Modifier.fillMaxSize()) {
                 // Draw simplified world map dots
                 val hotspots = listOf(
-                    Offset(0.72f, 0.45f) to RiskHigh,    // India
-                    Offset(0.52f, 0.6f) to RiskHigh,     // Nigeria
-                    Offset(0.48f, 0.32f) to RiskMedium,  // UK
-                    Offset(0.2f, 0.38f) to RiskHigh,     // New York
-                    Offset(0.82f, 0.42f) to RiskMedium,  // Beijing
-                    Offset(0.3f, 0.65f) to RiskHigh,     // Brazil
-                    Offset(0.78f, 0.56f) to RiskMedium,  // Jakarta
-                    Offset(0.56f, 0.56f) to RiskHigh,    // Kenya
+                    Offset(0.72f, 0.45f) to RiskHigh,    // India (South Asia - High)
+                    Offset(0.52f, 0.6f) to RiskMedium,   // Nigeria (Africa - Medium)
+                    Offset(0.48f, 0.32f) to RiskHigh,    // UK (Europe - High)
+                    Offset(0.2f, 0.38f) to RiskHigh,     // New York (North America - High)
+                    Offset(0.82f, 0.42f) to RiskMedium,  // Beijing (East Asia - Medium)
+                    Offset(0.3f, 0.65f) to RiskLow,      // Brazil (South America - Low)
+                    Offset(0.78f, 0.56f) to RiskHigh,    // Jakarta (SEA - High)
+                    Offset(0.6f, 0.42f) to RiskMedium,   // Dubai (Middle East - Medium)
+                    Offset(0.85f, 0.72f) to RiskLow      // Sydney (Oceania - Low)
                 )
                 hotspots.forEach { (pos, color) ->
                     repeat(3) { ring ->
@@ -213,20 +212,20 @@ fun SettingsScreen(
             SettingsSection("Account") {
                 GlassCard {
                     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                        val user = FirebaseAuth.getInstance().currentUser
+                        val user by viewModel.currentUser.collectAsState()
                         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                             Box(Modifier.size(44.dp).clip(CircleShape).background(NeonBlue.copy(0.2f)), contentAlignment = Alignment.Center) {
                                 Icon(Icons.Default.Person, null, tint = NeonBlue, modifier = Modifier.size(24.dp))
                             }
                             Column {
-                                Text(user?.displayName ?: "Shield User", color = ContentColor, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+                                Text(user?.displayName ?: user?.email?.substringBefore('@') ?: "Shield User", color = ContentColor, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
                                 Text(user?.email ?: "", color = ContentColor.copy(0.5f), fontSize = 12.sp)
                             }
                         }
                         HorizontalDivider(color = GlassBorder)
                         TextButton(
                             onClick = {
-                                FirebaseAuth.getInstance().signOut()
+                                viewModel.signOut()
                                 onSignOut()
                             },
                             modifier = Modifier.fillMaxWidth()

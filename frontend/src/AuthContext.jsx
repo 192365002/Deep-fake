@@ -1,21 +1,13 @@
-// ─── Auth Context — Smart Firebase + Dev-mode fallback ───────────────────────
+// ─── Auth Context — Supabase Authentication + Session Restoration ─────────────
 import { createContext, useContext, useState, useEffect, useCallback } from 'react';
+import { supabase, isSupabaseConfigured } from './supabase';
 import { healthCheck } from './api';
 
 const AuthContext = createContext(null);
 
-// Check if Firebase env vars are configured
-const hasFirebaseConfig = !!(
-  import.meta.env.VITE_FIREBASE_API_KEY &&
-  import.meta.env.VITE_FIREBASE_API_KEY !== 'AIzaSy...' &&
-  import.meta.env.VITE_FIREBASE_PROJECT_ID &&
-  import.meta.env.VITE_FIREBASE_PROJECT_ID !== 'your-project-id'
-);
-
-// ─── Provider ─────────────────────────────────────────────────────────────────
 export function AuthProvider({ children }) {
-  const [user, setUser]                 = useState(null);
-  const [loading, setLoading]           = useState(true);
+  const [user, setUser] = useState(null);
+  const [loading, setLoading] = useState(true);
   const [backendOnline, setBackendOnline] = useState(null);
 
   // Backend health check on mount
@@ -25,148 +17,237 @@ export function AuthProvider({ children }) {
       .catch(() => setBackendOnline(false));
   }, []);
 
-  // Restore session from localStorage on mount
-  useEffect(() => {
-    const stored = localStorage.getItem('ss_user');
-    if (stored) {
-      try { setUser(JSON.parse(stored)); } catch {}
-    }
-    setLoading(false);
-  }, []);
-
-  // ─── Internal setter ─────────────────────────────────────────────────────────
+  // ─── Token and User Persistence Helper ────────────────────────────────────────
   const persistUser = useCallback((userData, token) => {
-    localStorage.setItem('ss_user', JSON.stringify(userData));
-    localStorage.setItem('auth_token', token);
-    setUser(userData);
+    if (userData) {
+      localStorage.setItem('ss_user', JSON.stringify(userData));
+      if (token) localStorage.setItem('auth_token', token);
+      setUser(userData);
+    } else {
+      localStorage.removeItem('ss_user');
+      localStorage.removeItem('auth_token');
+      setUser(null);
+    }
   }, []);
 
-  // ─── Email/Password Login ─────────────────────────────────────────────────────
-  const login = async (email, password) => {
-    if (hasFirebaseConfig) {
-      const { initializeApp, getApps }          = await import('firebase/app');
-      const { getAuth, signInWithEmailAndPassword } = await import('firebase/auth');
+  // ─── Session Restoration & Live Auth State Listener ───────────────────────────
+  useEffect(() => {
+    let mounted = true;
 
-      const app  = getApps().length ? getApps()[0] : initializeApp({
-        apiKey:            import.meta.env.VITE_FIREBASE_API_KEY,
-        authDomain:        import.meta.env.VITE_FIREBASE_AUTH_DOMAIN,
-        projectId:         import.meta.env.VITE_FIREBASE_PROJECT_ID,
-        storageBucket:     import.meta.env.VITE_FIREBASE_STORAGE_BUCKET,
-        messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID,
-        appId:             import.meta.env.VITE_FIREBASE_APP_ID,
+    if (isSupabaseConfigured()) {
+      // 1. Get initial session
+      supabase.auth.getSession().then(({ data: { session } }) => {
+        if (!mounted) return;
+        if (session?.user) {
+          const u = session.user;
+          const userData = {
+            uid: u.id,
+            id: u.id,
+            email: u.email,
+            displayName: u.user_metadata?.full_name || u.user_metadata?.name || u.email?.split('@')[0],
+            role: u.user_metadata?.role || 'user',
+          };
+          persistUser(userData, session.access_token);
+        } else {
+          // Restore from localStorage if offline/demo
+          const stored = localStorage.getItem('ss_user');
+          if (stored) {
+            try { setUser(JSON.parse(stored)); } catch {}
+          }
+        }
+        setLoading(false);
       });
-      const auth = getAuth(app);
-      const cred = await signInWithEmailAndPassword(auth, email, password);
-      const token = await cred.user.getIdToken();
-      const userData = {
-        uid: cred.user.uid,
-        email: cred.user.email,
-        displayName: cred.user.displayName || email.split('@')[0],
+
+      // 2. Subscribe to auth changes (login, logout, token refresh)
+      const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
+        if (!mounted) return;
+        if (session?.user) {
+          const u = session.user;
+          const userData = {
+            uid: u.id,
+            id: u.id,
+            email: u.email,
+            displayName: u.user_metadata?.full_name || u.user_metadata?.name || u.email?.split('@')[0],
+            role: u.user_metadata?.role || 'user',
+          };
+          persistUser(userData, session.access_token);
+        } else if (event === 'SIGNED_OUT') {
+          persistUser(null, null);
+        }
+      });
+
+      return () => {
+        mounted = false;
+        subscription?.unsubscribe();
       };
-      persistUser(userData, token);
+    } else {
+      // ── Demo / Offline mode fallback ──
+      const stored = localStorage.getItem('ss_user');
+      if (stored) {
+        try { setUser(JSON.parse(stored)); } catch {}
+      }
+      setLoading(false);
+    }
+  }, [persistUser]);
+
+  // ─── Email & Password Login ───────────────────────────────────────────────────
+  const login = async (email, password) => {
+    if (isSupabaseConfigured()) {
+      const { data, error } = await supabase.auth.signInWithPassword({
+        email,
+        password,
+      });
+
+      if (error) throw error;
+
+      const u = data.user;
+      const userData = {
+        uid: u.id,
+        id: u.id,
+        email: u.email,
+        displayName: u.user_metadata?.full_name || u.user_metadata?.name || u.email?.split('@')[0],
+        role: u.user_metadata?.role || 'user',
+      };
+      persistUser(userData, data.session?.access_token);
       return userData;
     } else {
-      // ── Demo mode (no Firebase configured) ──
-      await new Promise((r) => setTimeout(r, 700));
+      // Demo mode fallback
+      await new Promise((r) => setTimeout(r, 600));
       const cleanEmail = email.replace(/[^a-zA-Z0-9]/g, '_');
       const token = 'demo_' + cleanEmail;
-      const userData = { uid: cleanEmail, email, displayName: email.split('@')[0] };
+      const userData = { uid: cleanEmail, id: cleanEmail, email, displayName: email.split('@')[0], role: 'user' };
       persistUser(userData, token);
       return userData;
     }
   };
 
   // ─── Sign Up ──────────────────────────────────────────────────────────────────
-  const signUp = async (email, password) => {
-    if (hasFirebaseConfig) {
-      const { initializeApp, getApps }               = await import('firebase/app');
-      const { getAuth, createUserWithEmailAndPassword } = await import('firebase/auth');
-      const app  = getApps().length ? getApps()[0] : initializeApp({
-        apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
-        authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN,
-        projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID,
-        storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET,
-        messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID,
-        appId: import.meta.env.VITE_FIREBASE_APP_ID,
+  const signUp = async (email, password, displayName) => {
+    if (isSupabaseConfigured()) {
+      const { data, error } = await supabase.auth.signUp({
+        email,
+        password,
+        options: {
+          data: {
+            full_name: displayName || email.split('@')[0],
+            name: displayName || email.split('@')[0],
+          },
+        },
       });
-      const auth = getAuth(app);
-      const cred = await createUserWithEmailAndPassword(auth, email, password);
-      const token = await cred.user.getIdToken();
-      const userData = { uid: cred.user.uid, email: cred.user.email, displayName: email.split('@')[0] };
-      persistUser(userData, token);
-      return userData;
+
+      if (error) throw error;
+
+      if (data.session) {
+        const u = data.user;
+        const userData = {
+          uid: u.id,
+          id: u.id,
+          email: u.email,
+          displayName: u.user_metadata?.full_name || displayName || email.split('@')[0],
+          role: 'user',
+        };
+        persistUser(userData, data.session.access_token);
+        return userData;
+      }
+
+      return {
+        message: 'Registration successful! Please check your email to verify your account.',
+        requiresEmailConfirmation: true,
+      };
     } else {
       return login(email, password);
     }
   };
 
-  // ─── Google Sign-In ───────────────────────────────────────────────────────────
+  // ─── Google OAuth Sign-In ─────────────────────────────────────────────────────
   const loginWithGoogle = async () => {
-    if (hasFirebaseConfig) {
-      const { initializeApp, getApps }               = await import('firebase/app');
-      const { getAuth, GoogleAuthProvider, signInWithPopup } = await import('firebase/auth');
-      const app      = getApps().length ? getApps()[0] : initializeApp({
-        apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
-        authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN,
-        projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID,
-        storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET,
-        messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID,
-        appId: import.meta.env.VITE_FIREBASE_APP_ID,
+    if (isSupabaseConfigured()) {
+      const { error } = await supabase.auth.signInWithOAuth({
+        provider: 'google',
+        options: {
+          redirectTo: window.location.origin + '/home',
+        },
       });
-      const auth     = getAuth(app);
-      const provider = new GoogleAuthProvider();
-      const cred     = await signInWithPopup(auth, provider);
-      const token    = await cred.user.getIdToken();
-      const userData = { uid: cred.user.uid, email: cred.user.email, displayName: cred.user.displayName || cred.user.email?.split('@')[0] };
-      persistUser(userData, token);
-      return userData;
+      if (error) throw error;
     } else {
-      await new Promise((r) => setTimeout(r, 500));
-      const userData = { uid: 'google_demo', email: 'demo@socialshield.ai', displayName: 'Demo User' };
-      persistUser(userData, 'google_demo_' + Date.now());
+      await new Promise((r) => setTimeout(r, 400));
+      const userData = { uid: 'google_demo_uuid_1010', id: 'google_demo_uuid_1010', email: 'demo@socialshield.ai', displayName: 'Demo Google User', role: 'user' };
+      persistUser(userData, 'demo_google_token_' + Date.now());
       return userData;
     }
+  };
+
+  // ─── Password Reset Flow ──────────────────────────────────────────────────────
+  const resetPassword = async (email) => {
+    if (isSupabaseConfigured()) {
+      const { error } = await supabase.auth.resetPasswordForEmail(email, {
+        redirectTo: window.location.origin + '/auth?mode=reset',
+      });
+      if (error) throw error;
+      return { message: 'Password reset link sent to your email.' };
+    } else {
+      return { message: 'Demo mode: password reset instructions sent.' };
+    }
+  };
+
+  const updatePassword = async (newPassword) => {
+    if (isSupabaseConfigured()) {
+      const { error } = await supabase.auth.updateUser({
+        password: newPassword,
+      });
+      if (error) throw error;
+      return { message: 'Password updated successfully!' };
+    }
+    return { message: 'Password updated (demo).' };
   };
 
   // ─── Logout ───────────────────────────────────────────────────────────────────
   const logout = async () => {
-    if (hasFirebaseConfig) {
+    if (isSupabaseConfigured()) {
       try {
-        const { getApps }  = await import('firebase/app');
-        const { getAuth, signOut } = await import('firebase/auth');
-        if (getApps().length) await signOut(getAuth(getApps()[0]));
-      } catch {}
-    }
-    localStorage.removeItem('auth_token');
-    localStorage.removeItem('ss_user');
-    setUser(null);
-  };
-
-  // ─── Update User Fields ────────────────────────────────────────────────────────
-  const updateUser = async (fields) => {
-    if (hasFirebaseConfig) {
-      try {
-        const { getApps } = await import('firebase/app');
-        const { getAuth, updateProfile } = await import('firebase/auth');
-        if (getApps().length) {
-          const auth = getAuth(getApps()[0]);
-          if (auth.currentUser && fields.displayName) {
-            await updateProfile(auth.currentUser, { displayName: fields.displayName });
-          }
-        }
+        await supabase.auth.signOut();
       } catch (err) {
-        console.error("Firebase profile update failed:", err);
+        console.error('Supabase signOut error:', err);
       }
     }
-    setUser((u) => {
-      const next = { ...u, ...fields };
+    persistUser(null, null);
+  };
+
+  // ─── Update User Profile Fields ───────────────────────────────────────────────
+  const updateUser = async (fields) => {
+    if (isSupabaseConfigured()) {
+      try {
+        const { error } = await supabase.auth.updateUser({
+          data: fields,
+        });
+        if (error) throw error;
+      } catch (err) {
+        console.error('Supabase profile update failed:', err);
+      }
+    }
+    setUser((prev) => {
+      const next = { ...prev, ...fields };
       localStorage.setItem('ss_user', JSON.stringify(next));
       return next;
     });
   };
 
   return (
-    <AuthContext.Provider value={{ user, loading, backendOnline, login, signUp, loginWithGoogle, logout, updateUser }}>
+    <AuthContext.Provider
+      value={{
+        user,
+        loading,
+        backendOnline,
+        login,
+        signUp,
+        loginWithGoogle,
+        resetPassword,
+        updatePassword,
+        logout,
+        updateUser,
+        isSupabaseConfigured: isSupabaseConfigured(),
+      }}
+    >
       {children}
     </AuthContext.Provider>
   );

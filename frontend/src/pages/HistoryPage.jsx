@@ -1,12 +1,15 @@
 // ─── History Page ─────────────────────────────────────────────────────────────
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { getHistory, deleteScan } from '../api';
+import { useAuth } from '../AuthContext';
+import { supabase, isSupabaseConfigured } from '../supabase';
 
 const FILTERS = ['ALL', 'IMAGE', 'VIDEO', 'AUDIO', 'TEXT', 'URL', 'PROFILE'];
 const ICONS = { IMAGE:'🖼️', VIDEO:'🎬', AUDIO:'🎙️', TEXT:'📝', URL:'🔗', PROFILE:'👤' };
 
 const DEMO_SCANS = Array.from({ length: 8 }, (_, i) => ({
+  id: `demo_${i}`,
   scanId: `demo_${i}`,
   mediaType: ['IMAGE','VIDEO','AUDIO','TEXT','URL','PROFILE'][i % 6],
   verdict: ['FAKE','REAL','SUSPICIOUS','REAL','FAKE','REAL','SUSPICIOUS','REAL'][i],
@@ -21,32 +24,60 @@ function VerdictBadge({ verdict }) {
 }
 
 export default function HistoryPage() {
+  const { user } = useAuth();
   const navigate = useNavigate();
   const [filter, setFilter] = useState('ALL');
   const [scans, setScans] = useState([]);
   const [loading, setLoading] = useState(true);
 
-  const load = (type) => {
+  const load = useCallback((type) => {
     setLoading(true);
     getHistory(type === 'ALL' ? null : type)
       .then((r) => setScans(r.data?.items || []))
-      .catch(() => setScans(type === 'ALL' ? DEMO_SCANS : DEMO_SCANS.filter((s) => s.mediaType === type)))
+      .catch(() => setScans(type === 'ALL' ? DEMO_SCANS : DEMO_SCANS.filter((s) => (s.mediaType || s.media_type) === type)))
       .finally(() => setLoading(false));
-  };
+  }, []);
 
-  useEffect(() => { load(filter); }, [filter]);
+  useEffect(() => {
+    load(filter);
+  }, [filter, load]);
+
+  // Live Realtime Subscriptions for Multi-Device Android / Web synchronization
+  useEffect(() => {
+    if (isSupabaseConfigured() && user?.uid) {
+      const channel = supabase
+        .channel(`realtime-history-${user.uid}`)
+        .on(
+          'postgres_changes',
+          { event: '*', schema: 'public', table: 'scans', filter: `user_id=eq.${user.uid}` },
+          (payload) => {
+            console.log('[Supabase Realtime] Scan change event received in HistoryPage:', payload);
+            load(filter);
+          }
+        )
+        .subscribe();
+
+      return () => {
+        supabase.removeChannel(channel);
+      };
+    }
+  }, [user?.uid, filter, load]);
 
   const handleDelete = async (id, e) => {
     e.stopPropagation();
-    try { await deleteScan(id); } catch {}
-    setScans((prev) => prev.filter((s) => s.scanId !== id));
+    try {
+      await deleteScan(id);
+      setScans((prev) => prev.filter((s) => (s.id !== id && s.scanId !== id && s.scan_id !== id)));
+    } catch (err) {
+      console.error("Failed to delete scan:", err);
+    }
   };
 
   return (
     <div>
       <div className="page-header">
         <h1>Scan History</h1>
-        <p>Your complete scan activity log</p>
+        <p>Your complete multi-device scan activity log</p>
       </div>
 
       {/* Filter chips */}
@@ -67,35 +98,42 @@ export default function HistoryPage() {
           <div className="empty-state">
             <div className="empty-icon">🔍</div>
             <h3 style={{ color:'rgba(255,255,255,0.5)', fontSize:16, marginBottom:6 }}>No scans found</h3>
-            <p style={{ fontSize:13 }}>Start scanning to see your results here</p>
+            <p style={{ fontSize:13 }}>Start scanning on Web or Android to see synchronized records here</p>
             <button className="btn-neon" style={{ marginTop:20 }} onClick={() => navigate('/home')}>Start Scanning</button>
           </div>
         ) : (
           <div style={{ display:'flex', flexDirection:'column', gap:10 }}>
-            {scans.map((scan) => (
-              <div key={scan.scanId} className="history-item" onClick={() => navigate(`/result/${scan.scanId}`)}>
-                <div className="history-icon-box" style={{ background:'rgba(0,212,255,0.08)', color:'var(--neon-blue)' }}>
-                  {ICONS[scan.mediaType] || '🛡️'}
-                </div>
-                <div style={{ flex:1, minWidth:0 }}>
-                  <div style={{ fontWeight:600, fontSize:14 }}>{scan.mediaType} Scan</div>
-                  <div style={{ fontSize:12, color:'rgba(255,255,255,0.4)', marginTop:2 }}>
-                    {new Date(scan.timestamp).toLocaleString()}
+            {scans.map((scan) => {
+              const sid = scan.id || scan.scanId || scan.scan_id;
+              const mtype = scan.mediaType || scan.media_type || 'SCAN';
+              const ts = scan.timestamp || scan.created_at;
+              return (
+                <div key={sid} className="history-item" onClick={() => navigate(`/result/${sid}`)}>
+                  <div className="history-icon-box" style={{ background:'rgba(0,212,255,0.08)', color:'var(--neon-blue)' }}>
+                    {ICONS[mtype] || '🛡️'}
+                  </div>
+                  <div style={{ flex:1, minWidth:0 }}>
+                    <div style={{ fontWeight:600, fontSize:14 }}>{mtype} Scan</div>
+                    <div style={{ fontSize:12, color:'rgba(255,255,255,0.4)', marginTop:2 }}>
+                      {ts ? new Date(ts).toLocaleString() : 'Just now'}
+                    </div>
+                  </div>
+                  <div style={{ display:'flex', alignItems:'center', gap:12, flexShrink:0 }}>
+                    <VerdictBadge verdict={scan.verdict} />
+                    <span style={{ color:'rgba(255,255,255,0.4)', fontSize:13 }}>
+                      {scan.confidence ? scan.confidence.toFixed(0) : '0'}%
+                    </span>
+                    <button
+                      onClick={(e) => handleDelete(sid, e)}
+                      style={{ background:'none', border:'none', cursor:'pointer', color:'rgba(255,255,255,0.25)', fontSize:18, padding:4 }}
+                      title="Delete scan"
+                    >
+                      🗑️
+                    </button>
                   </div>
                 </div>
-                <div style={{ display:'flex', alignItems:'center', gap:12, flexShrink:0 }}>
-                  <VerdictBadge verdict={scan.verdict} />
-                  <span style={{ color:'rgba(255,255,255,0.4)', fontSize:13 }}>{scan.confidence?.toFixed(0)}%</span>
-                  <button
-                    onClick={(e) => handleDelete(scan.scanId, e)}
-                    style={{ background:'none', border:'none', cursor:'pointer', color:'rgba(255,255,255,0.25)', fontSize:18, padding:4 }}
-                    title="Delete"
-                  >
-                    🗑️
-                  </button>
-                </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         )}
       </div>

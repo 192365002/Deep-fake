@@ -20,6 +20,8 @@ android {
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         
         buildConfigField "String", "BASE_URL", '"https://social-shield-app-backend.onrender.com/"'
+        buildConfigField "String", "SUPABASE_URL", '"https://imnrnjkrtiruwtimawbu.supabase.co/"'
+        buildConfigField "String", "SUPABASE_ANON_KEY", '"sb_publishable_vOQtn1DodrWRR1__jwlH8w_NIKD3bRh"'
     }
 
     buildTypes {

@@ -1,39 +1,64 @@
-"""History Router - Fetch user scan history from Firestore subcollections"""
+"""
+History Router for Social Shield - Supabase PostgreSQL Implementation
+Replaces Firestore subcollections with relational PostgreSQL queries,
+secure storage cleanup, and automated stats recalculation.
+"""
 from fastapi import APIRouter, Depends, HTTPException, Query
-from typing import Optional
+from typing import Optional, Dict, Any, List
 import logging
 
 from utils.auth import get_current_user
-from utils.database import get_db
+from utils.database import get_supabase_client, recalculate_and_update_stats, get_user_stats as db_get_user_stats
+from utils.storage import delete_scan_media, get_authorized_url
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
 
-def map_to_snake_case(data: dict) -> dict:
-    """Helper to convert camelCase Firestore keys to snake_case for Pydantic/Frontend compatibility"""
+def format_scan_record(data: Dict[str, Any]) -> Dict[str, Any]:
+    """Formats a database scan record to be compatible with both Android (camelCase) and Web (camelCase/snake_case)"""
     if not data:
         return data
-    mapped = {}
-    key_mapping = {
-        "scanId": "scan_id",
-        "userId": "user_id",
-        "mediaType": "media_type",
-        "verdict": "verdict",
-        "confidence": "confidence",
-        "fakeProbability": "fake_probability",
-        "realProbability": "real_probability",
-        "riskLevel": "risk_level",
-        "explanations": "explanations",
-        "recommendations": "recommendations",
-        "heatmapBase64": "heatmap_base64",
-        "metadata": "metadata",
-        "timestamp": "timestamp"
+
+    scan_id = str(data.get("id") or data.get("scan_id") or data.get("scanId"))
+    user_id = str(data.get("user_id") or data.get("userId"))
+    media_type = str(data.get("media_type") or data.get("mediaType") or "IMAGE")
+    verdict = str(data.get("verdict") or "SAFE")
+    conf = float(data.get("confidence") or 100.0)
+    fake_p = float(data.get("fake_probability") or data.get("fakeProbability") or 0.0)
+    real_p = float(data.get("real_probability") or data.get("realProbability") or 100.0)
+    risk = str(data.get("risk_level") or data.get("riskLevel") or "LOW")
+    explanations = data.get("explanations") or []
+    recommendations = data.get("recommendations") or []
+    ts = str(data.get("created_at") or data.get("timestamp") or "")
+
+    return {
+        "id": scan_id,
+        "scan_id": scan_id,
+        "scanId": scan_id,
+        "user_id": user_id,
+        "userId": user_id,
+        "media_type": media_type,
+        "mediaType": media_type,
+        "verdict": verdict,
+        "confidence": conf,
+        "fake_probability": fake_p,
+        "fakeProbability": fake_p,
+        "real_probability": real_p,
+        "realProbability": real_p,
+        "risk_level": risk,
+        "riskLevel": risk,
+        "explanations": explanations,
+        "recommendations": recommendations,
+        "heatmap_base64": data.get("heatmap_base64") or data.get("heatmapBase64"),
+        "heatmapBase64": data.get("heatmap_base64") or data.get("heatmapBase64"),
+        "storage_path": data.get("storage_path"),
+        "storage_url": data.get("storage_url"),
+        "storageUrl": data.get("storage_url"),
+        "metadata": data.get("metadata") or {},
+        "timestamp": ts,
+        "created_at": ts
     }
-    for k, v in data.items():
-        mapped_key = key_mapping.get(k, k)
-        mapped[mapped_key] = v
-    return mapped
 
 
 @router.get("/history")
@@ -43,37 +68,41 @@ async def get_history(
     limit: int = Query(20, ge=1, le=100),
     offset: int = Query(0, ge=0)
 ):
-    """Get paginated scan history for current user from their subcollection"""
+    """Retrieve paginated scan history for authenticated user from Supabase PostgreSQL"""
     try:
-        db = get_db()
-        query = db.collection("users").document(user_id).collection("scans")
-        
-        # In Firestore, we order by timestamp. If filtering by mediaType, we need an index.
-        # Fall back to manual filter if indexing isn't fully set up yet.
-        docs = query.order_by("timestamp", direction="DESCENDING").limit(limit + offset).stream()
-        
-        results = []
-        for doc in docs:
-            data = doc.to_dict()
-            data = map_to_snake_case(data)
-            data['id'] = doc.id
-            
-            # Apply media type filter manually to avoid requiring custom composite indexes
-            if media_type and data.get("media_type") != media_type.upper():
-                continue
-                
-            # Remove large fields for list view
-            data.pop('heatmap_base64', None)
-            results.append(data)
-            
-        # Apply offset manually
-        paginated_results = results[offset:offset + limit]
-        
-        return {"items": paginated_results, "count": len(results), "offset": offset}
-    
+        client = get_supabase_client()
+        query = client.table("scans").select("*").eq("user_id", user_id)
+
+        if media_type:
+            # Query for matching media type
+            res = query.order("created_at", desc=True).execute()
+            all_records = res.data or []
+            filtered = [r for r in all_records if str(r.get("media_type")).upper() == media_type.upper()]
+            total_count = len(filtered)
+            paginated = filtered[offset:offset + limit]
+        else:
+            res = query.order("created_at", desc=True).execute()
+            all_records = res.data or []
+            total_count = len(all_records)
+            paginated = all_records[offset:offset + limit]
+
+        items = []
+        for row in paginated:
+            formatted = format_scan_record(row)
+            # Remove bulky base64 data for efficient list responses
+            formatted.pop("heatmap_base64", None)
+            formatted.pop("heatmapBase64", None)
+            items.append(formatted)
+
+        return {
+            "items": items,
+            "count": total_count,
+            "offset": offset
+        }
+
     except Exception as e:
-        logger.error(f"History fetch error: {e}")
-        raise HTTPException(status_code=500, detail="Failed to fetch history")
+        logger.error(f"Supabase history query error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to retrieve scan history from database.")
 
 
 @router.get("/history/{scan_id}")
@@ -81,27 +110,38 @@ async def get_scan_detail(
     scan_id: str,
     user_id: str = Depends(get_current_user)
 ):
-    """Get full details for a specific scan"""
+    """Retrieve detailed scan report by ID from Supabase PostgreSQL"""
     try:
-        db = get_db()
-        doc_ref = db.collection("users").document(user_id).collection("scans").document(scan_id)
-        doc = doc_ref.get()
-        
-        if doc.exists:
-            return map_to_snake_case(doc.to_dict())
-            
-        # Fallback to searching by field if document ID does not match
-        docs = db.collection("users").document(user_id).collection("scans").where("scanId", "==", scan_id).limit(1).stream()
-        for d in docs:
-            return map_to_snake_case(d.to_dict())
-            
-        raise HTTPException(status_code=404, detail="Scan not found")
-    
+        client = get_supabase_client()
+        res = client.table("scans").select("*").eq("id", scan_id).eq("user_id", user_id).execute()
+
+        if not res.data:
+            # Check if scan_id was saved with alternate key or UUID
+            alt_res = client.table("scans").select("*").eq("user_id", user_id).execute()
+            match = next((r for r in (alt_res.data or []) if str(r.get("id")) == scan_id), None)
+            if not match:
+                raise HTTPException(status_code=404, detail="Scan record not found or access denied.")
+            row = match
+        else:
+            row = res.data[0]
+
+        formatted = format_scan_record(row)
+
+        # Refresh signed access URL if private file exists
+        storage_path = formatted.get("storage_path")
+        if storage_path:
+            fresh_url = await get_authorized_url(storage_path, expires_in=3600)
+            if fresh_url:
+                formatted["storage_url"] = fresh_url
+                formatted["storageUrl"] = fresh_url
+
+        return formatted
+
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Scan detail error: {e}")
-        raise HTTPException(status_code=500, detail="Failed to fetch scan")
+        logger.error(f"Error fetching scan detail: {e}")
+        raise HTTPException(status_code=500, detail="Failed to retrieve scan details.")
 
 
 @router.delete("/history/{scan_id}")
@@ -109,81 +149,80 @@ async def delete_scan(
     scan_id: str,
     user_id: str = Depends(get_current_user)
 ):
-    """Delete a scan record"""
+    """Delete a scan record and remove associated private storage media"""
     try:
-        db = get_db()
-        doc_ref = db.collection("users").document(user_id).collection("scans").document(scan_id)
-        doc = doc_ref.get()
-        
-        if doc.exists:
-            doc_ref.delete()
-            return {"message": "Scan deleted successfully"}
-            
-        # Fallback to search
-        docs = list(db.collection("users").document(user_id).collection("scans").where("scanId", "==", scan_id).limit(1).stream())
-        if not docs:
-            raise HTTPException(status_code=404, detail="Scan not found")
-            
-        docs[0].reference.delete()
-        return {"message": "Scan deleted successfully"}
-    
+        client = get_supabase_client()
+        # Find record to retrieve storage path
+        res = client.table("scans").select("*").eq("id", scan_id).eq("user_id", user_id).execute()
+        if not res.data:
+            raise HTTPException(status_code=404, detail="Scan record not found or access denied.")
+
+        row = res.data[0]
+        storage_path = row.get("storage_path")
+
+        # Delete from PostgreSQL table
+        client.table("scans").delete().eq("id", scan_id).eq("user_id", user_id).execute()
+
+        # Clean up Supabase Storage file
+        if storage_path:
+            await delete_scan_media(storage_path)
+
+        # Recalculate user statistics
+        await recalculate_and_update_stats(user_id)
+
+        return {"message": "Scan deleted successfully", "scan_id": scan_id}
+
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Failed to delete scan: {e}")
-        raise HTTPException(status_code=500, detail="Failed to delete scan")
+        logger.error(f"Error deleting scan {scan_id}: {e}")
+        raise HTTPException(status_code=500, detail="Failed to delete scan record.")
 
 
-@router.delete("")
-async def clear_history(user_id: str = Depends(get_current_user)):
-    """Delete all scan history records for the current user"""
+@router.delete("/history")
+async def clear_all_history(user_id: str = Depends(get_current_user)):
+    """Clear all scan records and associated storage files for the authenticated user"""
     try:
-        db = get_db()
-        docs = list(db.collection("users").document(user_id).collection("scans").stream())
-        for doc in docs:
-            doc.reference.delete()
-        return {"message": "All scan history cleared successfully", "count": len(docs)}
+        client = get_supabase_client()
+        res = client.table("scans").select("*").eq("user_id", user_id).execute()
+        records = res.data or []
+
+        for row in records:
+            storage_path = row.get("storage_path")
+            if storage_path:
+                await delete_scan_media(storage_path)
+
+        client.table("scans").delete().eq("user_id", user_id).execute()
+        await recalculate_and_update_stats(user_id)
+
+        return {"message": "All history cleared successfully", "count": len(records)}
+
     except Exception as e:
-        logger.error(f"Clear history error: {e}")
-        raise HTTPException(status_code=500, detail="Failed to clear scan history")
+        logger.error(f"Error clearing history: {e}")
+        raise HTTPException(status_code=500, detail="Failed to clear scan history.")
 
 
 @router.get("/stats")
-async def get_user_stats(user_id: str = Depends(get_current_user)):
-    """Get aggregated stats for dashboard trust score"""
+async def get_user_statistics(user_id: str = Depends(get_current_user)):
+    """Retrieve user aggregate stats (trust score, totals) from Supabase PostgreSQL"""
     try:
-        db = get_db()
-        docs = list(db.collection("users").document(user_id).collection("scans").stream())
-        
-        total = len(docs)
-        fake_count = sum(1 for d in docs if str(d.to_dict().get('verdict')).upper() == 'FAKE')
-        suspicious = sum(1 for d in docs if str(d.to_dict().get('verdict')).upper() == 'SUSPICIOUS')
-        safe_count = sum(1 for d in docs if str(d.to_dict().get('verdict')).upper() in ('SAFE', 'REAL'))
-        
-        trust_score = 100
-        if total > 0:
-            threat_rate = (fake_count + suspicious * 0.5) / total
-            trust_score = max(0, int(100 - threat_rate * 100))
-        
-        # Self-healing: Update the main users stats document with correct calculated values
-        try:
-            db.collection("users").document(user_id).set({
-                "totalScans": total,
-                "fakeDetected": fake_count,
-                "suspiciousDetected": suspicious,
-                "safeDetected": safe_count,
-                "trustScore": trust_score
-            }, merge=True)
-        except Exception as db_err:
-            logger.error(f"Self-healing stats update failed: {db_err}")
-            
+        stats = await db_get_user_stats(user_id)
+        # Return both snake_case and camelCase
         return {
-            "total_scans": total,
-            "fake_detected": fake_count,
-            "suspicious_detected": suspicious,
-            "safe_detected": safe_count,
-            "trust_score": trust_score
+            "total_scans": stats.get("totalScans", 0),
+            "fake_detected": stats.get("fakeDetected", 0),
+            "suspicious_detected": stats.get("suspiciousDetected", 0),
+            "safe_detected": stats.get("safeDetected", 0),
+            "trust_score": stats.get("trustScore", 100),
+            "totalScans": stats.get("totalScans", 0),
+            "fakeDetected": stats.get("fakeDetected", 0),
+            "suspiciousDetected": stats.get("suspiciousDetected", 0),
+            "safeDetected": stats.get("safeDetected", 0),
+            "trustScore": stats.get("trustScore", 100)
         }
     except Exception as e:
-        logger.error(f"Failed to get stats: {e}")
-        return {"total_scans": 0, "fake_detected": 0, "suspicious_detected": 0, "safe_detected": 0, "trust_score": 100}
+        logger.error(f"Error fetching stats: {e}")
+        return {
+            "total_scans": 0, "fake_detected": 0, "suspicious_detected": 0, "safe_detected": 0, "trust_score": 100,
+            "totalScans": 0, "fakeDetected": 0, "suspiciousDetected": 0, "safeDetected": 0, "trustScore": 100
+        }

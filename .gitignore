@@ -25,6 +25,25 @@ __pycache__/
 *.pyc
 .pytest_cache/
 
+# Environment and secrets
+.env
+*.env
+.env.*
+!.env.example
+*.local
+
+# Node and frontend
+node_modules/
+/frontend/node_modules/
+/tools/
+
+# Mock databases and artifacts
+supabase_mock_store.json
+*.log
+scratch/
+__pycache__/
+*.pyc
+
 # IDE files
 .idea/
 *.suo
@@ -37,3 +56,5 @@ __pycache__/
 /app-build/
 /flutter_app/android/build/
 /flutter_app/build/
+
+static/uploads/*

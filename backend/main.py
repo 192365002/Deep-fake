@@ -1,6 +1,7 @@
 """
 SocialShield Backend - FastAPI
 AI-powered multi-modal fraud & deepfake detection API
+Integrated with Supabase Auth, PostgreSQL, Supabase Storage, and Hugging Face.
 """
 from fastapi import FastAPI, HTTPException, Depends, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
@@ -11,7 +12,7 @@ import logging
 
 from routers import image_router, video_router, audio_router, text_router, url_router, profile_router, history_router
 from utils.auth import verify_token
-from utils.database import init_db
+from utils.database import init_db, is_mock_db, _last_db_error
 from ml.models import model_registry
 
 logging.basicConfig(level=logging.INFO)
@@ -19,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    logger.info("SocialShield API starting up...")
+    logger.info("SocialShield API starting up with Supabase integration...")
     await init_db()
     try:
         model_registry.load_all()
@@ -30,7 +31,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="SocialShield API",
-    description="AI-powered digital fraud and deepfake detection system",
+    description="AI-powered digital fraud and deepfake detection system with Supabase Platform",
     version="1.0.0",
     lifespan=lifespan
 )
@@ -61,17 +62,25 @@ app.include_router(history_router.router, prefix="/api/v1", tags=["History"])
 
 @app.get("/")
 async def root():
-    return {"status": "active", "service": "SocialShield API", "version": "1.0.0"}
+    return {
+        "status": "active",
+        "service": "SocialShield API",
+        "version": "1.0.0",
+        "auth": "Supabase Auth",
+        "database": "Supabase PostgreSQL",
+        "storage": "Supabase Storage",
+        "deepfake_model": "prithivMLmods/deepfake-detector-model-v1"
+    }
 
 @app.get("/health")
 async def health():
-    from utils.auth import _firebase_initialized
-    from utils.database import _db, _last_db_error
     return {
         "status": "healthy",
         "models": "loaded",
-        "firebase_initialized": _firebase_initialized,
-        "database_type": "firestore" if _db is not None else "mock_json",
+        "deepfake_model": "prithivMLmods/deepfake-detector-model-v1",
+        "auth_provider": "supabase",
+        "database_type": "supabase_postgresql" if not is_mock_db() else "mock_json",
+        "storage_provider": "supabase_storage",
         "last_db_error": _last_db_error
     }
 
