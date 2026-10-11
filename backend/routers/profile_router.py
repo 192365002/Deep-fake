@@ -171,6 +171,9 @@ async def scan_profile(
     )
     
     from utils.database import save_scan_result_and_update_stats
-    await save_scan_result_and_update_stats(user_id, result.scan_id, result.dict())
+    try:
+        await save_scan_result_and_update_stats(user_id, result.scan_id, result.dict())
+    except Exception as e:
+        logger.error(f"Non-fatal error persisting profile scan to database: {e}")
     
     return result.dict()

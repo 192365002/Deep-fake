@@ -305,7 +305,12 @@ async def save_scan_result_and_update_stats(user_id: str, scan_id: str, result: 
     except Exception as e:
         _last_db_error = str(e)
         logger.error(f"Error persisting scan to Supabase PostgreSQL: {e}")
-        raise
+        # Save to mock/local store so record is not lost
+        try:
+            if _mock_client:
+                _mock_client.table("scans").insert(scan_record).execute()
+        except Exception:
+            pass
 
 
 async def recalculate_and_update_stats(user_id: str, new_verdict: Optional[str] = None):

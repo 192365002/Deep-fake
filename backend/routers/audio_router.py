@@ -110,6 +110,9 @@ async def scan_audio(
     result_dict["storage_url"] = storage_info.get("storage_url")
 
     # 3. Save to Supabase PostgreSQL and update user stats
-    await save_scan_result_and_update_stats(user_id, scan_id, result_dict)
+    try:
+        await save_scan_result_and_update_stats(user_id, scan_id, result_dict)
+    except Exception as e:
+        logger.error(f"Non-fatal error persisting audio scan to database: {e}")
 
     return result_dict

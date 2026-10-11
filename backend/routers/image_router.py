@@ -125,6 +125,9 @@ async def scan_image(file: UploadFile = File(...), user_id: str = Depends(get_cu
     result_dict["storage_url"] = storage_info.get("storage_url")
 
     # 4. Save to Supabase PostgreSQL and update user stats
-    await save_scan_result_and_update_stats(user_id, scan_id, result_dict)
+    try:
+        await save_scan_result_and_update_stats(user_id, scan_id, result_dict)
+    except Exception as e:
+        logger.error(f"Non-fatal error persisting scan to database: {e}")
 
     return result_dict
