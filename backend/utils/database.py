@@ -234,17 +234,33 @@ async def init_db():
     _is_mock = True
 
 
-def get_supabase_client():
+def get_supabase_client(token: Optional[str] = None):
     global _supabase_client
-    if _supabase_client is None:
-        supabase_url = os.getenv("SUPABASE_URL")
-        supabase_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_KEY")
-        if supabase_url and supabase_key and "example" not in supabase_url:
-            try:
+    supabase_url = os.getenv("SUPABASE_URL")
+    supabase_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_KEY") or os.getenv("SUPABASE_ANON_KEY")
+
+    if token is None:
+        try:
+            from utils.auth import get_current_request_token
+            token = get_current_request_token()
+        except Exception:
+            token = None
+
+    if supabase_url and supabase_key and "example" not in supabase_url:
+        try:
+            if token and not token.startswith("dev_") and not token.startswith("demo_"):
+                # Authenticated client scoped to user JWT
+                user_client = create_client(supabase_url, supabase_key)
+                user_client.postgrest.auth(token)
+                return user_client
+
+            if _supabase_client is None or isinstance(_supabase_client, MockSupabaseClient):
                 _supabase_client = create_client(supabase_url, supabase_key)
-                return _supabase_client
-            except Exception:
-                pass
+            return _supabase_client
+        except Exception as e:
+            logger.warning(f"Failed to create supabase client: {e}")
+
+    if _supabase_client is None:
         _supabase_client = MockSupabaseClient()
     return _supabase_client
 
@@ -253,14 +269,14 @@ def is_mock_db() -> bool:
     return _is_mock
 
 
-async def save_scan_result_and_update_stats(user_id: str, scan_id: str, result: dict):
+async def save_scan_result_and_update_stats(user_id: str, scan_id: str, result: dict, token: Optional[str] = None):
     """
     Persists scan result into Supabase PostgreSQL 'scans' table and updates 'user_stats'.
     Supports bidirectional mapping between snake_case and camelCase for Android and Web.
     """
     global _last_db_error
     try:
-        client = get_supabase_client()
+        client = get_supabase_client(token)
 
         # Normalize media_type and verdict strings
         media_type = result.get("media_type") or result.get("mediaType") or "IMAGE"
@@ -298,7 +314,7 @@ async def save_scan_result_and_update_stats(user_id: str, scan_id: str, result: 
             client.from_("scans").insert(scan_record).execute()
 
         # 2. Update user_stats in PostgreSQL (recalculates stats)
-        await recalculate_and_update_stats(user_id, verdict)
+        await recalculate_and_update_stats(user_id, verdict, token=token)
 
         logger.info(f"Scan {scan_id} persisted to Supabase PostgreSQL for user {user_id}")
 
@@ -307,16 +323,15 @@ async def save_scan_result_and_update_stats(user_id: str, scan_id: str, result: 
         logger.error(f"Error persisting scan to Supabase PostgreSQL: {e}")
         # Save to mock/local store so record is not lost
         try:
-            if _mock_client:
-                _mock_client.table("scans").insert(scan_record).execute()
+            MockSupabaseClient().table("scans").insert(scan_record).execute()
         except Exception:
             pass
 
 
-async def recalculate_and_update_stats(user_id: str, new_verdict: Optional[str] = None):
+async def recalculate_and_update_stats(user_id: str, new_verdict: Optional[str] = None, token: Optional[str] = None):
     """Calculates aggregates and updates public.user_stats"""
     try:
-        client = get_supabase_client()
+        client = get_supabase_client(token)
         # Fetch current user scans
         res = client.table("scans").select("*").eq("user_id", user_id).execute()
         scans = res.data or []
@@ -350,10 +365,10 @@ async def recalculate_and_update_stats(user_id: str, new_verdict: Optional[str] 
         logger.warning(f"Failed to recalculate user stats in client: {e}")
 
 
-async def get_user_stats(user_id: str) -> Dict[str, Any]:
+async def get_user_stats(user_id: str, token: Optional[str] = None) -> Dict[str, Any]:
     """Retrieve aggregate stats for user from public.user_stats"""
     try:
-        client = get_supabase_client()
+        client = get_supabase_client(token)
         res = client.table("user_stats").select("*").eq("user_id", user_id).execute()
         if res.data and len(res.data) > 0:
             row = res.data[0]

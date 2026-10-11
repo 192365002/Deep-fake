@@ -27,37 +27,83 @@ export default function HomePage() {
   const [recent, setRecent] = useState([]);
   const [statsLoading, setStatsLoading] = useState(true);
 
-  const loadData = useCallback(() => {
-    getUserStats()
-      .then((r) => {
-        const data = r.data;
-        setStats({
-          totalScans: data.total_scans ?? data.totalScans ?? 0,
-          fakeDetected: data.fake_detected ?? data.fakeDetected ?? 0,
-          suspiciousDetected: data.suspicious_detected ?? data.suspiciousDetected ?? 0,
-          safeDetected: data.safe_detected ?? data.safeDetected ?? 0,
-          trustScore: data.trust_score ?? data.trustScore ?? 100,
-        });
-      })
-      .catch(() => setStats({ totalScans: 0, fakeDetected: 0, suspiciousDetected: 0, safeDetected: 0, trustScore: 100 }))
-      .finally(() => setStatsLoading(false));
+  const loadData = useCallback(async () => {
+    setStatsLoading(true);
+    let loadedStats = null;
+    let loadedRecent = [];
 
-    getHistory()
-      .then((r) => setRecent(r.data?.items?.slice(0, 4) || []))
-      .catch(() => setRecent([]));
-  }, []);
+    // 1. Try backend API
+    try {
+      const statsRes = await getUserStats();
+      if (statsRes.data && (statsRes.data.total_scans > 0 || statsRes.data.totalScans > 0)) {
+        loadedStats = {
+          totalScans: statsRes.data.total_scans ?? statsRes.data.totalScans ?? 0,
+          fakeDetected: statsRes.data.fake_detected ?? statsRes.data.fakeDetected ?? 0,
+          suspiciousDetected: statsRes.data.suspicious_detected ?? statsRes.data.suspiciousDetected ?? 0,
+          safeDetected: statsRes.data.safe_detected ?? statsRes.data.safeDetected ?? 0,
+          trustScore: statsRes.data.trust_score ?? statsRes.data.trustScore ?? 100,
+        };
+      }
+    } catch {}
+
+    try {
+      const histRes = await getHistory();
+      if (histRes.data?.items?.length > 0) {
+        loadedRecent = histRes.data.items.slice(0, 4);
+      }
+    } catch {}
+
+    // 2. Direct Supabase fallback for instant real-time synchronization
+    let uid = user?.id || user?.uid;
+    if (!uid && isSupabaseConfigured()) {
+      try {
+        const { data: { user: sbUser } } = await supabase.auth.getUser();
+        if (sbUser) uid = sbUser.id;
+      } catch {}
+    }
+
+    if (isSupabaseConfigured() && uid) {
+      try {
+        const { data: dbScans } = await supabase
+          .from('scans')
+          .select('*')
+          .eq('user_id', uid)
+          .order('created_at', { ascending: false });
+
+        if (dbScans && dbScans.length > 0) {
+          if (!loadedRecent || loadedRecent.length === 0 || dbScans.length > loadedRecent.length) {
+            loadedRecent = dbScans.slice(0, 4);
+          }
+          const total = dbScans.length;
+          const fake = dbScans.filter(s => String(s.verdict).toUpperCase() === 'FAKE' || String(s.verdict).toUpperCase() === 'DANGEROUS').length;
+          const suspicious = dbScans.filter(s => String(s.verdict).toUpperCase() === 'SUSPICIOUS').length;
+          const safe = dbScans.filter(s => ['SAFE', 'REAL'].includes(String(s.verdict).toUpperCase())).length;
+          const trust = total > 0 ? Math.round(((safe + 0.5 * suspicious) / total) * 100) : 100;
+          if (!loadedStats || total >= (loadedStats.totalScans || 0)) {
+            loadedStats = { totalScans: total, fakeDetected: fake, suspiciousDetected: suspicious, safeDetected: safe, trustScore: trust };
+          }
+        }
+      } catch (err) {
+        console.error("Direct Supabase query error:", err);
+      }
+    }
+
+    setStats(loadedStats || { totalScans: 0, fakeDetected: 0, suspiciousDetected: 0, safeDetected: 0, trustScore: 100 });
+    setRecent(loadedRecent || []);
+    setStatsLoading(false);
+  }, [user?.id, user?.uid]);
 
   // Initial load + Supabase Realtime synchronization
   useEffect(() => {
     loadData();
 
-    // Bidirectional Synchronization: Listen to changes made from Android or other sessions
-    if (isSupabaseConfigured() && user?.uid) {
+    // Bidirectional Synchronization: Live WebSocket listener
+    if (isSupabaseConfigured()) {
       const channel = supabase
-        .channel(`realtime-scans-home-${user.uid}`)
+        .channel(`realtime-scans-home-live`)
         .on(
           'postgres_changes',
-          { event: '*', schema: 'public', table: 'scans', filter: `user_id=eq.${user.uid}` },
+          { event: '*', schema: 'public', table: 'scans' },
           (payload) => {
             console.log('[Supabase Realtime] Scan event received on Web:', payload);
             loadData();
@@ -65,7 +111,7 @@ export default function HomePage() {
         )
         .on(
           'postgres_changes',
-          { event: '*', schema: 'public', table: 'user_stats', filter: `user_id=eq.${user.uid}` },
+          { event: '*', schema: 'public', table: 'user_stats' },
           (payload) => {
             console.log('[Supabase Realtime] User stats updated on Web:', payload);
             loadData();
@@ -77,7 +123,7 @@ export default function HomePage() {
         supabase.removeChannel(channel);
       };
     }
-  }, [user?.uid, loadData]);
+  }, [loadData]);
 
   const scoreColor = stats.trustScore >= 80 ? '#06FFA5' : stats.trustScore >= 50 ? '#FFB800' : '#FF3B3B';
   const greetName = user?.displayName || user?.email?.split('@')[0] || 'Shield User';

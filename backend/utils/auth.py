@@ -12,10 +12,19 @@ from utils.database import get_supabase_client, is_mock_db
 
 logger = logging.getLogger(__name__)
 
+import contextvars
+
+current_token_var: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar("current_token", default=None)
+
 security = HTTPBearer()
 
 SUPABASE_JWT_SECRET = os.getenv("SUPABASE_JWT_SECRET", "")
 SUPABASE_URL = os.getenv("SUPABASE_URL", "")
+
+
+def get_current_request_token() -> Optional[str]:
+    """Retrieves current request bearer token from async context"""
+    return current_token_var.get()
 
 
 async def get_current_user(credentials: HTTPAuthorizationCredentials = Security(security)) -> str:
@@ -24,6 +33,7 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Security(
     Enforces that user identity is derived strictly from verified JWT claims.
     """
     token = credentials.credentials
+    current_token_var.set(token)
     user_info = verify_supabase_token(token)
     return user_info["sub"]
 

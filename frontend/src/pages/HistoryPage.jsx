@@ -30,13 +30,46 @@ export default function HistoryPage() {
   const [scans, setScans] = useState([]);
   const [loading, setLoading] = useState(true);
 
-  const load = useCallback((type) => {
+  const load = useCallback(async (type) => {
     setLoading(true);
-    getHistory(type === 'ALL' ? null : type)
-      .then((r) => setScans(r.data?.items || []))
-      .catch(() => setScans(type === 'ALL' ? DEMO_SCANS : DEMO_SCANS.filter((s) => (s.mediaType || s.media_type) === type)))
-      .finally(() => setLoading(false));
-  }, []);
+    let items = null;
+
+    // 1. Try backend API first
+    try {
+      const r = await getHistory(type === 'ALL' ? null : type);
+      if (r.data?.items && r.data.items.length > 0) {
+        items = r.data.items;
+      }
+    } catch (e) {
+      console.warn("Backend getHistory failed, falling back to direct Supabase query:", e);
+    }
+
+    // 2. Direct Supabase fallback for instant live sync
+    if ((!items || items.length === 0) && isSupabaseConfigured() && (user?.id || user?.uid)) {
+      const uid = user.id || user.uid;
+      try {
+        let q = supabase
+          .from('scans')
+          .select('*')
+          .eq('user_id', uid)
+          .order('created_at', { ascending: false });
+
+        if (type && type !== 'ALL') {
+          q = q.eq('media_type', type.toUpperCase());
+        }
+
+        const { data, error } = await q;
+        if (!error && data && data.length > 0) {
+          items = data;
+        }
+      } catch (err) {
+        console.error("Direct Supabase history error:", err);
+      }
+    }
+
+    setScans(items || []);
+    setLoading(false);
+  }, [user?.id, user?.uid]);
 
   useEffect(() => {
     load(filter);
@@ -44,12 +77,12 @@ export default function HistoryPage() {
 
   // Live Realtime Subscriptions for Multi-Device Android / Web synchronization
   useEffect(() => {
-    if (isSupabaseConfigured() && user?.uid) {
+    if (isSupabaseConfigured()) {
       const channel = supabase
-        .channel(`realtime-history-${user.uid}`)
+        .channel(`realtime-history-sync-channel`)
         .on(
           'postgres_changes',
-          { event: '*', schema: 'public', table: 'scans', filter: `user_id=eq.${user.uid}` },
+          { event: '*', schema: 'public', table: 'scans' },
           (payload) => {
             console.log('[Supabase Realtime] Scan change event received in HistoryPage:', payload);
             load(filter);
@@ -61,7 +94,7 @@ export default function HistoryPage() {
         supabase.removeChannel(channel);
       };
     }
-  }, [user?.uid, filter, load]);
+  }, [filter, load]);
 
   const handleDelete = async (id, e) => {
     e.stopPropagation();

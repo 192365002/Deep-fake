@@ -8,6 +8,8 @@ import okhttp3.RequestBody
 import retrofit2.Response
 import retrofit2.http.*
 
+import kotlinx.serialization.Serializable
+
 interface SocialShieldApi {
 
     @Multipart
@@ -52,7 +54,7 @@ interface SocialShieldApi {
     @GET("api/v1/history")
     suspend fun getHistory(
         @Query("media_type") mediaType: String? = null,
-        @Query("limit") limit: Int = 20,
+        @Query("limit") limit: Int = 50,
         @Query("offset") offset: Int = 0,
         @Header("Authorization") token: String
     ): Response<HistoryResponse>
@@ -75,15 +77,18 @@ interface SocialShieldApi {
     ): Response<StatsResponse>
 }
 
+@Serializable
 data class HistoryResponse(
-    val items: List<ScanHistoryItem>,
-    val count: Int,
-    val offset: Int
+    val items: List<ScanHistoryItem> = emptyList(),
+    val count: Int = 0,
+    val offset: Int = 0
 )
 
+@Serializable
 data class StatsResponse(
-    val totalScans: Int,
-    val fakeDetected: Int,
-    val suspiciousDetected: Int,
-    val trustScore: Int
+    val totalScans: Int = 0,
+    val fakeDetected: Int = 0,
+    val suspiciousDetected: Int = 0,
+    val safeDetected: Int = 0,
+    val trustScore: Int = 100
 )

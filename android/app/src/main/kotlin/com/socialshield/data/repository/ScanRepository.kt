@@ -34,8 +34,8 @@ class ScanRepository @Inject constructor(
     private val api: SocialShieldApi,
     private val authManager: SupabaseAuthManager
 ) {
-    private var cachedResult: ScanResult? = null
-    private val refreshTrigger = MutableSharedFlow<Unit>(replay = 1).apply { tryEmit(Unit) }
+    var cachedResult: ScanResult? = null
+    val refreshTrigger = MutableSharedFlow<Unit>(replay = 1).apply { tryEmit(Unit) }
 
     private fun getAuthToken(): String {
         val token = authManager.getAccessToken()
@@ -50,29 +50,36 @@ class ScanRepository @Inject constructor(
         return file
     }
 
+    fun triggerRefresh() {
+        refreshTrigger.tryEmit(Unit)
+    }
+
     /**
      * Realtime flow emitting user statistics from Supabase Backend.
      * Periodically updates and immediately refreshes on new scans.
      */
     fun getUserStatsFlow(): Flow<StatsResponse?> = flow {
+        var lastStats = StatsResponse(0, 0, 0, 0, 100)
         while (true) {
-            val user = authManager.currentUser
-            if (user == null) {
-                emit(StatsResponse(0, 0, 0, 100))
-            } else {
-                try {
-                    val token = getAuthToken()
-                    val response = api.getUserStats(token)
-                    if (response.isSuccessful && response.body() != null) {
-                        emit(response.body())
-                    } else {
-                        emit(StatsResponse(0, 0, 0, 100))
-                    }
-                } catch (e: Exception) {
-                    emit(StatsResponse(0, 0, 0, 100))
+            try {
+                val token = getAuthToken()
+                val response = api.getUserStats(token)
+                if (response.isSuccessful && response.body() != null) {
+                    lastStats = response.body()!!
+                    emit(lastStats)
+                } else if (lastStats.totalScans > 0) {
+                    emit(lastStats)
+                } else {
+                    emit(StatsResponse(0, 0, 0, 0, 100))
+                }
+            } catch (e: Exception) {
+                if (lastStats.totalScans > 0) {
+                    emit(lastStats)
+                } else {
+                    emit(StatsResponse(0, 0, 0, 0, 100))
                 }
             }
-            delay(5000) // Poll every 5 seconds for live multi-device synchronization
+            delay(3000) // Poll every 3 seconds for instant multi-device synchronization
         }
     }.flowOn(Dispatchers.IO)
 
@@ -81,22 +88,23 @@ class ScanRepository @Inject constructor(
      * Synchronizes bidirectional additions and deletions across Android and Web.
      */
     fun getHistoryFlow(mediaType: String? = null): Flow<List<ScanHistoryItem>> = flow {
+        var lastHistory = emptyList<ScanHistoryItem>()
         while (true) {
-            val user = authManager.currentUser
-            if (user == null) {
-                emit(emptyList())
-            } else {
-                try {
-                    val token = getAuthToken()
-                    val response = api.getHistory(mediaType = mediaType, limit = 50, offset = 0, token = token)
-                    if (response.isSuccessful && response.body() != null) {
-                        emit(response.body()!!.items)
-                    }
-                } catch (e: Exception) {
-                    // Retain current state on network hiccups
+            try {
+                val token = getAuthToken()
+                val response = api.getHistory(mediaType = mediaType, limit = 50, offset = 0, token = token)
+                if (response.isSuccessful && response.body() != null) {
+                    lastHistory = response.body()!!.items
+                    emit(lastHistory)
+                } else if (lastHistory.isNotEmpty()) {
+                    emit(lastHistory)
+                }
+            } catch (e: Exception) {
+                if (lastHistory.isNotEmpty()) {
+                    emit(lastHistory)
                 }
             }
-            delay(5000) // Multi-device synchronization refresh cadence
+            delay(3000) // Instant 3-second multi-device synchronization cadence
         }
     }.flowOn(Dispatchers.IO)
 

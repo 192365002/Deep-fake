@@ -35,11 +35,11 @@ data class ScanResult(
 
 @Serializable
 data class ScanHistoryItem(
-    val scanId: String,
-    val mediaType: String,
-    val verdict: String,
-    val confidence: Float,
-    val timestamp: String
+    val scanId: String = "",
+    val mediaType: String = "IMAGE",
+    val verdict: String = "SAFE",
+    val confidence: Float = 100f,
+    val timestamp: String = ""
 )
 
 // Serializer for Any type
